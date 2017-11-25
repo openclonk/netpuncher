@@ -1,0 +1,178 @@
+package c4netioudp
+
+import "bytes"
+import "encoding/binary"
+import "io"
+import "net"
+
+// struct BinAddr
+// {
+// 	uint16_t port;
+// 	uint8_t type{0};
+// 	union
+// 	{
+// 		uint8_t v4[4];
+// 		uint8_t v6[16];
+// 	};
+// };
+const binAddrSize = 2 + 1 + 16
+
+func readBinAddr(b []byte) (addr net.UDPAddr) {
+	addr.Port = int(binary.LittleEndian.Uint16(b[0:]))
+	switch b[2] {
+	case 1: // IPv4
+		addr.IP = net.IPv4(b[3], b[4], b[5], b[6])
+	case 2: // IPv6
+		addr.IP = append([]byte(nil), b[3:19]...)
+	}
+	return
+}
+
+// Note: assumes that writing can't fail, i.e. w has to be a bytes.Buffer
+func writeBinAddr(w io.Writer, addr *net.UDPAddr) {
+	binary.Write(w, binary.LittleEndian, uint16(addr.Port))
+	if v4 := addr.IP.To4(); v4 != nil {
+		w.Write([]byte{1})
+		w.Write(v4)
+		// Pad the rest of the union with 0
+		w.Write(net.IPv6unspecified[4:])
+	} else {
+		v6 := addr.IP.To16()
+		if v6 == nil {
+			panic("invalid IP address")
+		}
+		w.Write([]byte{2})
+		w.Write(v6)
+	}
+}
+
+const PacketHdrSize = 1 + 4
+
+const (
+	IPID_Ping    = 0
+	IPID_Test    = 1
+	IPID_Conn    = 2
+	IPID_ConnOK  = 3
+	IPID_AddAddr = 7
+	IPID_Data    = 4
+	IPID_Check   = 5
+	IPID_Close   = 6
+)
+
+type PacketHdr struct {
+	StatusByte uint8
+	Nr         uint32 // packet nr
+}
+
+func ReadPacketHdr(b []byte) PacketHdr {
+	var hdr PacketHdr
+	hdr.StatusByte = b[0]
+	hdr.Nr = binary.LittleEndian.Uint32(b[1:])
+	return hdr
+}
+
+func (hdr *PacketHdr) WriteTo(w io.Writer) (n int64, err error) {
+	var buf [PacketHdrSize]byte
+	buf[0] = hdr.StatusByte
+	binary.LittleEndian.PutUint32(buf[1:], hdr.Nr)
+	written, err := w.Write(buf[:])
+	return int64(written), err
+}
+
+const ConnPacketSize = PacketHdrSize + 4 + 2*binAddrSize
+const ProtocolVer = 2
+
+type ConnPacket struct {
+	PacketHdr
+	ProtocolVer uint32
+	Addr        net.UDPAddr
+	MCAddr      net.UDPAddr
+}
+
+func NewConnPacket(addr net.UDPAddr) ConnPacket {
+	return ConnPacket{
+		PacketHdr:   PacketHdr{StatusByte: IPID_Conn},
+		ProtocolVer: ProtocolVer,
+		Addr:        addr,
+		MCAddr:      net.UDPAddr{IP: net.IPv6unspecified},
+	}
+}
+
+func ReadConnPacket(b []byte) (pkg ConnPacket) {
+	pkg.PacketHdr = ReadPacketHdr(b)
+	pkg.ProtocolVer = binary.LittleEndian.Uint32(b[PacketHdrSize:])
+	pkg.Addr = readBinAddr(b[PacketHdrSize+4:])
+	pkg.MCAddr = readBinAddr(b[PacketHdrSize+4+binAddrSize:])
+	return
+}
+
+func (pkg *ConnPacket) WriteTo(w io.Writer) (n int64, err error) {
+	var buf bytes.Buffer
+	pkg.PacketHdr.WriteTo(&buf)
+	binary.Write(&buf, binary.LittleEndian, pkg.ProtocolVer)
+	writeBinAddr(&buf, &pkg.Addr)
+	writeBinAddr(&buf, &pkg.MCAddr)
+	if buf.Len() != ConnPacketSize {
+		panic("ConnPacket has invalid size")
+	}
+	return buf.WriteTo(w)
+}
+
+// Values for ConnOkPacket.MCMode
+const (
+	MCM_NoMC = iota
+	MCM_MC
+	MCM_MCOK
+)
+
+const ConnOkPacketSize = PacketHdrSize + 4 + binAddrSize
+
+type ConnOkPacket struct {
+	PacketHdr
+	MCMode uint32
+	Addr   net.UDPAddr
+}
+
+func NewConnOkPacket(addr net.UDPAddr) ConnOkPacket {
+	return ConnOkPacket{
+		PacketHdr: PacketHdr{StatusByte: IPID_ConnOK},
+		MCMode:    MCM_NoMC,
+		Addr:      addr,
+	}
+}
+
+func ReadConnOkPacket(b []byte) (pkg ConnOkPacket) {
+	pkg.PacketHdr = ReadPacketHdr(b)
+	pkg.MCMode = binary.LittleEndian.Uint32(b[PacketHdrSize:])
+	pkg.Addr = readBinAddr(b[PacketHdrSize+4:])
+	return
+}
+
+func (pkg *ConnOkPacket) WriteTo(w io.Writer) (n int64, err error) {
+	var buf bytes.Buffer
+	pkg.PacketHdr.WriteTo(&buf)
+	binary.Write(&buf, binary.LittleEndian, pkg.MCMode)
+	writeBinAddr(&buf, &pkg.Addr)
+	if buf.Len() != ConnOkPacketSize {
+		panic("ConnOkPacket has invalid size")
+	}
+	return buf.WriteTo(w)
+}
+
+type AddAddrPacket struct {
+	PacketHdr
+	Addr    net.UDPAddr
+	NewAddr net.UDPAddr
+}
+
+type DataPacketHdr struct {
+	PacketHdr
+	FNr  uint32 // start fragment of this series
+	Size uint32 // packet size (all fragments)
+}
+
+type CheckPacketHdr struct {
+	PacketHdr
+	AskCount, MCAskCount uint32
+	AckNr, MCAckNr       uint32 // numbers of the last packets received
+}
