@@ -108,6 +108,7 @@ func ReadConnPacket(b []byte) (pkg ConnPacket) {
 
 func (pkg *ConnPacket) WriteTo(w io.Writer) (n int64, err error) {
 	var buf bytes.Buffer
+	buf.Grow(ConnPacketSize)
 	pkg.PacketHdr.WriteTo(&buf)
 	binary.Write(&buf, binary.LittleEndian, pkg.ProtocolVer)
 	writeBinAddr(&buf, &pkg.Addr)
@@ -150,6 +151,7 @@ func ReadConnOkPacket(b []byte) (pkg ConnOkPacket) {
 
 func (pkg *ConnOkPacket) WriteTo(w io.Writer) (n int64, err error) {
 	var buf bytes.Buffer
+	buf.Grow(ConnOkPacketSize)
 	pkg.PacketHdr.WriteTo(&buf)
 	binary.Write(&buf, binary.LittleEndian, pkg.MCMode)
 	writeBinAddr(&buf, &pkg.Addr)
@@ -159,11 +161,15 @@ func (pkg *ConnOkPacket) WriteTo(w io.Writer) (n int64, err error) {
 	return buf.WriteTo(w)
 }
 
+// I think we can ignore that one as it's only important for peer-to-peer
+// communication.
 type AddAddrPacket struct {
 	PacketHdr
 	Addr    net.UDPAddr
 	NewAddr net.UDPAddr
 }
+
+const DataPacketHdrSize = PacketHdrSize + 2*4
 
 type DataPacketHdr struct {
 	PacketHdr
@@ -171,8 +177,68 @@ type DataPacketHdr struct {
 	Size uint32 // packet size (all fragments)
 }
 
+func NewDataPacketHdr(fnr, size uint32) DataPacketHdr {
+	return DataPacketHdr{
+		PacketHdr: PacketHdr{StatusByte: IPID_Data},
+		FNr:       fnr,
+		Size:      size,
+	}
+}
+
+func ReadDataPacketHdr(b []byte) (pkg DataPacketHdr) {
+	pkg.PacketHdr = ReadPacketHdr(b)
+	pkg.FNr = binary.LittleEndian.Uint32(b[PacketHdrSize:])
+	pkg.Size = binary.LittleEndian.Uint32(b[PacketHdrSize+4:])
+	return
+}
+
+func (pkg *DataPacketHdr) WriteTo(w io.Writer) (n int64, err error) {
+	var buf bytes.Buffer
+	buf.Grow(DataPacketHdrSize)
+	pkg.PacketHdr.WriteTo(&buf)
+	binary.Write(&buf, binary.LittleEndian, pkg.FNr)
+	binary.Write(&buf, binary.LittleEndian, pkg.Size)
+	if buf.Len() != DataPacketHdrSize {
+		panic("DataPacketHdr has invalid size")
+	}
+	return buf.WriteTo(w)
+}
+
+const CheckPacketHdrSize = PacketHdrSize + 4*4
+
 type CheckPacketHdr struct {
 	PacketHdr
 	AskCount, MCAskCount uint32
 	AckNr, MCAckNr       uint32 // numbers of the last packets received
+}
+
+func NewCheckPacketHdr(askcount, acknr uint32) CheckPacketHdr {
+	return CheckPacketHdr{
+		PacketHdr: PacketHdr{StatusByte: IPID_Check},
+		AskCount:  askcount,
+		AckNr:     acknr,
+	}
+}
+
+func ReadCheckPacketHdr(b []byte) (pkg CheckPacketHdr) {
+	pkg.PacketHdr = ReadPacketHdr(b)
+	pkg.AskCount = binary.LittleEndian.Uint32(b[DataPacketHdrSize:])
+	pkg.MCAskCount = binary.LittleEndian.Uint32(b[DataPacketHdrSize+4:])
+	pkg.AckNr = binary.LittleEndian.Uint32(b[DataPacketHdrSize+8:])
+	pkg.MCAckNr = binary.LittleEndian.Uint32(b[DataPacketHdrSize+12:])
+	return
+}
+
+func (pkg *CheckPacketHdr) WriteTo(w io.Writer) (n int64, err error) {
+	var buf bytes.Buffer
+	buf.Grow(CheckPacketHdrSize)
+	pkg.PacketHdr.WriteTo(&buf)
+	binary.Write(&buf, binary.LittleEndian, pkg.AskCount)
+	binary.Write(&buf, binary.LittleEndian, pkg.MCAskCount)
+	binary.Write(&buf, binary.LittleEndian, pkg.AckNr)
+	binary.Write(&buf, binary.LittleEndian, pkg.MCAckNr)
+	if buf.Len() != CheckPacketHdrSize {
+		panic("CheckPacketHdr has invalid size")
+	}
+	return buf.WriteTo(w)
 }
