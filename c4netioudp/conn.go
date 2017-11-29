@@ -233,8 +233,15 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 }
 
 func (c *Conn) Close() error {
+	select {
+	case <-c.quit:
+		return fmt.Errorf("connection was already closed")
+	default:
+	}
 	close(c.quit)
-	// TODO: Send IPID_Close packet to server
+	// Send IPID_Close packet to server
+	closePacket := NewClosePacket(*c.raddr)
+	_, _ = closePacket.WriteTo(c.udp)
 	return c.udp.Close()
 }
 

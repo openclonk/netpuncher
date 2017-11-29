@@ -258,3 +258,34 @@ func (pkg *CheckPacketHdr) WriteTo(w io.Writer) (n int64, err error) {
 	binary.Write(&buf, binary.LittleEndian, pkg.MCAsk)
 	return buf.WriteTo(w)
 }
+
+const ClosePacketSize = PacketHdrSize + binAddrSize
+
+type ClosePacket struct {
+	PacketHdr
+	Addr net.UDPAddr
+}
+
+func NewClosePacket(addr net.UDPAddr) ClosePacket {
+	return ClosePacket{
+		PacketHdr: PacketHdr{StatusByte: IPID_Close},
+		Addr:      addr,
+	}
+}
+
+func ReadClosePacket(b []byte) (pkg ClosePacket) {
+	pkg.PacketHdr = ReadPacketHdr(b)
+	pkg.Addr = readBinAddr(b[PacketHdrSize:])
+	return
+}
+
+func (pkg *ClosePacket) WriteTo(w io.Writer) (n int64, err error) {
+	var buf bytes.Buffer
+	buf.Grow(ClosePacketSize)
+	pkg.PacketHdr.WriteTo(&buf)
+	writeBinAddr(&buf, &pkg.Addr)
+	if buf.Len() != ClosePacketSize {
+		panic("ClosePacket has invalid size")
+	}
+	return buf.WriteTo(w)
+}
