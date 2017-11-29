@@ -1,18 +1,24 @@
 package c4netioudp
 
 import (
+	"bytes"
+	"container/list"
 	"fmt"
 	"net"
+	"sort"
+	"sync/atomic"
 	"time"
 )
 
 type Conn struct {
-	udp      *net.UDPConn
-	raddr    *net.UDPAddr // address we connect to
-	laddr    *net.UDPAddr // local address as seen by server
-	datachan chan []byte  // channel for complete packages
-	errchan  chan error   // channel for read errors
-	quit     chan bool    // closed to signal goroutines
+	udp            *net.UDPConn
+	raddr          *net.UDPAddr    // address we connect to
+	laddr          *net.UDPAddr    // local address as seen by server
+	datachan       chan []byte     // channel for complete packages
+	errchan        chan error      // channel for read errors
+	sendchan       chan sendPacket // channel for outgoing packets
+	quit           chan bool       // closed to signal goroutines
+	oPacketCounter uint32          // FNr of last outgoing packet
 }
 
 func Dial(network string, laddr, raddr *net.UDPAddr) (*Conn, error) {
@@ -20,6 +26,7 @@ func Dial(network string, laddr, raddr *net.UDPAddr) (*Conn, error) {
 		raddr:    raddr,
 		datachan: make(chan []byte, 32),
 		errchan:  make(chan error),
+		sendchan: make(chan sendPacket, 64), // should never block
 		quit:     make(chan bool),
 	}
 	var err error
@@ -75,13 +82,13 @@ func (c *Conn) connect() error {
 	return nil
 }
 
-type packet struct {
+type recvPacket struct {
 	fragments    map[uint32][]byte
 	size         uint32 // combined size of fragments
 	completeSize uint32
 }
 
-func (p *packet) assemble(fnr uint32) []byte {
+func (p *recvPacket) assemble(fnr uint32) []byte {
 	buf := make([]byte, 0, p.size)
 	for nr := fnr; uint32(len(buf)) < p.size; nr++ {
 		fragment, ok := p.fragments[nr]
@@ -121,10 +128,10 @@ func (c *Conn) handlePackets() {
 		}
 	}()
 	ticker := time.NewTicker(checkInterval)
-	dpackets := make(map[uint32]*packet)
+	dpackets := make(map[uint32]*recvPacket)
+	sendPackets := list.New()
 	var IPacketCounter uint32  // FNr of next incoming packet
 	var RIPacketCounter uint32 // from incoming Check packet
-	var OPacketCounter uint32  // FNr of last outgoing packet
 	for {
 		select {
 		case <-c.quit:
@@ -151,7 +158,7 @@ func (c *Conn) handlePackets() {
 					break
 				}
 			}
-			check := NewCheckPacketHdr(asks, IPacketCounter, OPacketCounter)
+			check := NewCheckPacketHdr(asks, IPacketCounter, c.oPacketCounter)
 			_, _ = check.WriteTo(c.udp)
 		case r := <-rfuchan:
 			if r.err != nil {
@@ -181,7 +188,7 @@ func (c *Conn) handlePackets() {
 				datasize := uint32(r.n - DataPacketHdrSize)
 				pkt := dpackets[data.FNr]
 				if pkt == nil {
-					pkt = &packet{
+					pkt = &recvPacket{
 						fragments:    make(map[uint32][]byte),
 						completeSize: data.Size,
 					}
@@ -207,11 +214,51 @@ func (c *Conn) handlePackets() {
 					continue
 				}
 				check := ReadCheckPacketHdr(r.buf)
-				// TODO: Handle retransmission of sent packages
-				fmt.Println("received check", check)
+				// Remove all ACKed packets.
+				var next *list.Element
+				for e := sendPackets.Front(); e != nil; e = next {
+					next = e.Next()
+					p := e.Value.(sendPacket)
+					if p.fnr+uint32(len(p.fragments))-1 < check.AckNr {
+						sendPackets.Remove(e)
+					}
+				}
+				// Handle retransmission of packets in Ask.
+				if len(check.Ask) > 0 {
+					asks := uint32Slice(check.Ask)
+					sort.Sort(asks)
+					i := 0
+					e := sendPackets.Front()
+					for e != nil && i < len(asks) {
+						ask := check.Ask[i]
+						p := e.Value.(sendPacket)
+						if ask >= p.fnr && ask < p.fnr+uint32(len(p.fragments)) {
+							c.writeFragment(p.fragments[ask-p.fnr], ask, p.fnr, p.size)
+							i++
+						} else {
+							e = e.Next()
+						}
+					}
+				}
 			case IPID_Close:
 				// TODO: Decode packet and check Addr
 				c.Close()
+			}
+		case pkt := <-c.sendchan:
+			// Save the packet for potential retransmission later on.
+			// Insert in the right spot which may not be at the end (race
+			// condition between allocating sequence numbers and sending to
+			// the channel).
+			haveInserted := false
+			for e := sendPackets.Back(); e != nil; e = e.Prev() {
+				if e.Value.(sendPacket).fnr < pkt.fnr {
+					sendPackets.InsertAfter(pkt, e)
+					haveInserted = true
+					break
+				}
+			}
+			if !haveInserted {
+				sendPackets.PushFront(pkt)
 			}
 		}
 	}
@@ -228,8 +275,43 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 	}
 }
 
+type sendPacket struct {
+	fragments [][]byte
+	fnr, size uint32
+}
+
+func (c *Conn) writeFragment(frag []byte, nr, fnr, size uint32) {
+	datapkt := NewDataPacketHdr(nr, fnr, size)
+	var buf bytes.Buffer
+	datapkt.WriteTo(&buf)
+	buf.Write(frag)
+	buf.WriteTo(c.udp)
+}
+
+// Write a full message to c.
 func (c *Conn) Write(b []byte) (n int, err error) {
-	panic("not implemented")
+	cnt := FragmentCnt(len(b))
+	// Allocate sequence numbers for all fragments.
+	fnr := atomic.AddUint32(&c.oPacketCounter, uint32(cnt)) - uint32(cnt) + 1
+	// Copy the buffer as we have to keep the data for retransmissions.
+	bc := append([]byte(nil), b...)
+	size := uint32(len(b))
+	fragments := make([][]byte, cnt)
+	for i := 0; i < cnt; i++ {
+		high := (i + 1) * MaxDataSize
+		if high > len(b) {
+			high = len(b)
+		}
+		fragments[i] = bc[i*MaxDataSize : high]
+		c.writeFragment(fragments[i], fnr+uint32(i), fnr, size)
+	}
+	// Move the packet over to the handlePackets loop for retransmissions.
+	c.sendchan <- sendPacket{
+		fragments: fragments,
+		fnr:       fnr,
+		size:      size,
+	}
+	return len(b), nil
 }
 
 func (c *Conn) Close() error {
@@ -264,3 +346,10 @@ func (c *Conn) SetReadDeadline(t time.Time) error {
 func (c *Conn) SetWriteDeadline(t time.Time) error {
 	return c.udp.SetWriteDeadline(t)
 }
+
+// For sorting with sort package.
+type uint32Slice []uint32
+
+func (p uint32Slice) Len() int           { return len(p) }
+func (p uint32Slice) Less(i, j int) bool { return p[i] < p[j] }
+func (p uint32Slice) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }

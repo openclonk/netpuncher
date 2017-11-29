@@ -170,6 +170,17 @@ type AddAddrPacket struct {
 }
 
 const DataPacketHdrSize = PacketHdrSize + 2*4
+const MaxSize = 512
+const MaxDataSize = 512 - DataPacketHdrSize
+
+// Number of fragments needed for a packet of size len.
+func FragmentCnt(len int) int {
+	if len > 0 {
+		return (len-1)/MaxDataSize + 1
+	} else {
+		return 1
+	}
+}
 
 type DataPacketHdr struct {
 	PacketHdr
@@ -177,9 +188,9 @@ type DataPacketHdr struct {
 	Size uint32 // packet size (all fragments)
 }
 
-func NewDataPacketHdr(fnr, size uint32) DataPacketHdr {
+func NewDataPacketHdr(nr, fnr, size uint32) DataPacketHdr {
 	return DataPacketHdr{
-		PacketHdr: PacketHdr{StatusByte: IPID_Data},
+		PacketHdr: PacketHdr{StatusByte: IPID_Data, Nr: nr},
 		FNr:       fnr,
 		Size:      size,
 	}
