@@ -12,6 +12,7 @@ type Conn struct {
 	laddr    *net.UDPAddr // local address as seen by server
 	datachan chan []byte  // channel for complete packages
 	errchan  chan error   // channel for read errors
+	quit     chan bool    // closed to signal goroutines
 }
 
 func Dial(network string, laddr, raddr *net.UDPAddr) (*Conn, error) {
@@ -19,6 +20,7 @@ func Dial(network string, laddr, raddr *net.UDPAddr) (*Conn, error) {
 		raddr:    raddr,
 		datachan: make(chan []byte, 32),
 		errchan:  make(chan error),
+		quit:     make(chan bool),
 	}
 	var err error
 	c.udp, err = net.DialUDP(network, laddr, raddr)
@@ -91,68 +93,126 @@ func (p *packet) assemble(fnr uint32) []byte {
 	return buf
 }
 
+// Return value from ReadFromUDP
+type rfu struct {
+	buf []byte
+	n   int
+	err error
+}
+
+// Interval Check packets are sent in
+const checkInterval = 1 * time.Second
+
+// Maximum number of asks per Check packet
+const maxAsks = 10
+
 func (c *Conn) handlePackets() {
-	buf := make([]byte, 1500)
+	rfuchan := make(chan rfu)
+	go func() {
+		for {
+			var r rfu
+			r.buf = make([]byte, 1500)
+			r.n, _, r.err = c.udp.ReadFromUDP(r.buf)
+			select {
+			case rfuchan <- r: // ok
+			case <-c.quit:
+				return
+			}
+		}
+	}()
+	ticker := time.NewTicker(checkInterval)
 	dpackets := make(map[uint32]*packet)
-	var packetCounter uint32 // FNr of next packet
+	var IPacketCounter uint32  // FNr of next incoming packet
+	var RIPacketCounter uint32 // from incoming Check packet
+	var OPacketCounter uint32  // FNr of last outgoing packet
 	for {
-		nread, _, err := c.udp.ReadFromUDP(buf)
-		if err != nil {
-			c.errchan <- err
-			continue
-		}
-		if nread < PacketHdrSize {
-			continue
-		}
-		hdr := ReadPacketHdr(buf)
-		switch hdr.StatusByte & 0x7f {
-		case IPID_Ping:
-			// Reply to ping, ignore errors.
-			ping := PacketHdr{StatusByte: IPID_Ping}
-			_, _ = ping.WriteTo(c.udp)
-		case IPID_Data:
-			if nread < DataPacketHdrSize {
+		select {
+		case <-c.quit:
+			ticker.Stop()
+			return
+		case <-ticker.C:
+			// Time for a Check packet!
+			ask := make(map[uint32]bool) // poor gopher's set
+			// First, assume everything missing.
+			for i := IPacketCounter; i < RIPacketCounter; i++ {
+				ask[i] = true
+			}
+			// Now remove those packets we already received.
+			for i := range dpackets {
+				for nr := range dpackets[i].fragments {
+					delete(ask, nr)
+				}
+			}
+			// Gather everything into a slice.
+			asks := make([]uint32, 0, maxAsks)
+			for nr := range ask {
+				asks = append(asks, nr)
+				if len(asks) == maxAsks {
+					break
+				}
+			}
+			check := NewCheckPacketHdr(asks, IPacketCounter, OPacketCounter)
+			_, _ = check.WriteTo(c.udp)
+		case r := <-rfuchan:
+			if r.err != nil {
+				c.errchan <- r.err
 				continue
 			}
-			data := ReadDataPacketHdr(buf)
-			if hdr.Nr < packetCounter {
-				continue // duplicate packet
+			if r.n < PacketHdrSize {
+				continue
 			}
-			datasize := uint32(nread - DataPacketHdrSize)
-			pkt := dpackets[data.FNr]
-			if pkt == nil {
-				pkt = &packet{
-					fragments:    make(map[uint32][]byte),
-					completeSize: data.Size,
+			hdr := ReadPacketHdr(r.buf)
+			if hdr.Nr > RIPacketCounter {
+				RIPacketCounter = hdr.Nr
+			}
+			switch hdr.StatusByte & 0x7f {
+			case IPID_Ping:
+				// Reply to ping, ignore errors.
+				ping := PacketHdr{StatusByte: IPID_Ping}
+				_, _ = ping.WriteTo(c.udp)
+			case IPID_Data:
+				if r.n < DataPacketHdrSize {
+					continue
 				}
-				dpackets[data.FNr] = pkt
-			}
-			pkt.fragments[hdr.Nr] = append([]byte(nil), buf[DataPacketHdrSize:nread]...)
-			pkt.size += datasize
-			// Assemble complete packets.
-			if packetCounter == data.FNr {
-				for {
-					pkt, ok := dpackets[packetCounter]
-					if ok && pkt.size >= pkt.completeSize {
-						delete(dpackets, packetCounter)
-						c.datachan <- pkt.assemble(packetCounter)
-						packetCounter += uint32(len(pkt.fragments))
-					} else {
-						break
+				data := ReadDataPacketHdr(r.buf)
+				if hdr.Nr < IPacketCounter {
+					continue // duplicate packet
+				}
+				datasize := uint32(r.n - DataPacketHdrSize)
+				pkt := dpackets[data.FNr]
+				if pkt == nil {
+					pkt = &packet{
+						fragments:    make(map[uint32][]byte),
+						completeSize: data.Size,
+					}
+					dpackets[data.FNr] = pkt
+				}
+				pkt.fragments[hdr.Nr] = r.buf[DataPacketHdrSize:r.n]
+				pkt.size += datasize
+				// Assemble complete packets.
+				if IPacketCounter == data.FNr {
+					for {
+						pkt, ok := dpackets[IPacketCounter]
+						if ok && pkt.size >= pkt.completeSize {
+							delete(dpackets, IPacketCounter)
+							c.datachan <- pkt.assemble(IPacketCounter)
+							IPacketCounter += uint32(len(pkt.fragments))
+						} else {
+							break
+						}
 					}
 				}
+			case IPID_Check:
+				if r.n < CheckPacketHdrSize {
+					continue
+				}
+				check := ReadCheckPacketHdr(r.buf)
+				// TODO: Handle retransmission of sent packages
+				fmt.Println("received check", check)
+			case IPID_Close:
+				// TODO: Decode packet and check Addr
+				c.Close()
 			}
-		case IPID_Check:
-			if nread < CheckPacketHdrSize {
-				continue
-			}
-			check := ReadCheckPacketHdr(buf)
-			// TODO: Handle retransmission of sent packages
-			fmt.Println("received check", check)
-		case IPID_Close:
-			// TODO: Decode packet and check Addr
-			c.Close()
-			return
 		}
 	}
 }
@@ -173,6 +233,7 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 }
 
 func (c *Conn) Close() error {
+	close(c.quit)
 	// TODO: Send IPID_Close packet to server
 	return c.udp.Close()
 }

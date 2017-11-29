@@ -208,37 +208,53 @@ const CheckPacketHdrSize = PacketHdrSize + 4*4
 
 type CheckPacketHdr struct {
 	PacketHdr
-	AskCount, MCAskCount uint32
-	AckNr, MCAckNr       uint32 // numbers of the last packets received
+	//AskCount, MCAskCount uint32
+	Ask, MCAsk     []uint32
+	AckNr, MCAckNr uint32 // numbers of the last packets received
 }
 
-func NewCheckPacketHdr(askcount, acknr uint32) CheckPacketHdr {
+func NewCheckPacketHdr(ask []uint32, acknr, outacknr uint32) CheckPacketHdr {
 	return CheckPacketHdr{
-		PacketHdr: PacketHdr{StatusByte: IPID_Check},
-		AskCount:  askcount,
+		PacketHdr: PacketHdr{StatusByte: IPID_Check, Nr: outacknr},
+		Ask:       ask,
 		AckNr:     acknr,
 	}
 }
 
 func ReadCheckPacketHdr(b []byte) (pkg CheckPacketHdr) {
 	pkg.PacketHdr = ReadPacketHdr(b)
-	pkg.AskCount = binary.LittleEndian.Uint32(b[DataPacketHdrSize:])
-	pkg.MCAskCount = binary.LittleEndian.Uint32(b[DataPacketHdrSize+4:])
+	AskCount := binary.LittleEndian.Uint32(b[DataPacketHdrSize:])
+	MCAskCount := binary.LittleEndian.Uint32(b[DataPacketHdrSize+4:])
 	pkg.AckNr = binary.LittleEndian.Uint32(b[DataPacketHdrSize+8:])
 	pkg.MCAckNr = binary.LittleEndian.Uint32(b[DataPacketHdrSize+12:])
+	// Read Ask and MCAsk arrays following the header.
+	// TODO: Verify that b is large enough.
+	pkg.Ask = make([]uint32, AskCount)
+	pkg.MCAsk = make([]uint32, MCAskCount)
+	pos := CheckPacketHdrSize
+	for i := uint32(0); i < AskCount; i++ {
+		pkg.Ask[i] = binary.LittleEndian.Uint32(b[pos:])
+		pos += 4
+	}
+	for i := uint32(0); i < MCAskCount; i++ {
+		pkg.MCAsk[i] = binary.LittleEndian.Uint32(b[pos:])
+		pos += 4
+	}
 	return
 }
 
 func (pkg *CheckPacketHdr) WriteTo(w io.Writer) (n int64, err error) {
 	var buf bytes.Buffer
-	buf.Grow(CheckPacketHdrSize)
+	buf.Grow(CheckPacketHdrSize + 4*len(pkg.Ask) + 4*len(pkg.MCAsk))
 	pkg.PacketHdr.WriteTo(&buf)
-	binary.Write(&buf, binary.LittleEndian, pkg.AskCount)
-	binary.Write(&buf, binary.LittleEndian, pkg.MCAskCount)
+	binary.Write(&buf, binary.LittleEndian, uint32(len(pkg.Ask)))
+	binary.Write(&buf, binary.LittleEndian, uint32(len(pkg.MCAsk)))
 	binary.Write(&buf, binary.LittleEndian, pkg.AckNr)
 	binary.Write(&buf, binary.LittleEndian, pkg.MCAckNr)
 	if buf.Len() != CheckPacketHdrSize {
 		panic("CheckPacketHdr has invalid size")
 	}
+	binary.Write(&buf, binary.LittleEndian, pkg.Ask)
+	binary.Write(&buf, binary.LittleEndian, pkg.MCAsk)
 	return buf.WriteTo(w)
 }
