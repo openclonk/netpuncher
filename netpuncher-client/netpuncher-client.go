@@ -1,6 +1,7 @@
 package main
 
 import "fmt"
+import "github.com/lluchs/netpuncher"
 import "github.com/lluchs/netpuncher/c4netioudp"
 import "net"
 import "os"
@@ -26,12 +27,10 @@ func main() {
 	//}
 	//fmt.Println("sent", n, "byte")
 
-	buf := make([]byte, 1500)
-	nread, err := conn.Read(buf)
+	msg, err := netpuncher.ReadFrom(conn)
 	if err != nil {
 		fmt.Println("error while reading", err)
 		os.Exit(1)
 	}
-	fmt.Println("received", nread, "byte")
-	fmt.Printf("%x\n", buf[:nread])
+	fmt.Printf("got message type 0x%x %T: %+v\n", msg.Type(), msg, msg)
 }
