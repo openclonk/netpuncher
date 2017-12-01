@@ -3,6 +3,7 @@ package c4netioudp
 import (
 	"bytes"
 	"container/list"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -10,6 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 )
+
+var ErrConnectionClosed = errors.New("connection closed")
 
 type Conn struct {
 	udp            *net.UDPConn
@@ -263,7 +266,7 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 	case err = <-c.errchan:
 		return
 	case <-c.quit:
-		return 0, fmt.Errorf("connection closed")
+		return 0, ErrConnectionClosed
 	}
 }
 

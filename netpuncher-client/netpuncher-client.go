@@ -23,7 +23,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	raddr, err := net.ResolveUDPAddr("udp6", flag.Arg(0))
+	raddr, err := net.ResolveUDPAddr("udp", flag.Arg(0))
 	if err != nil {
 		fmt.Println("invalid address", err)
 		os.Exit(1)

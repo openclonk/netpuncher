@@ -100,7 +100,7 @@ type AssID struct {
 func (*AssID) Type() byte { return PID_Puncher_AssID }
 
 // error is always nil
-func (p *AssID) MarshalBinary() ([]byte, error) {
+func (p AssID) MarshalBinary() ([]byte, error) {
 	var b bytes.Buffer
 	b.WriteByte(p.Type())
 	b.WriteString(strconv.FormatUint(uint64(p.CID), 10))
@@ -114,7 +114,7 @@ type SReq struct {
 func (*SReq) Type() byte { return PID_Puncher_SReq }
 
 // error is always nil
-func (p *SReq) MarshalBinary() ([]byte, error) {
+func (p SReq) MarshalBinary() ([]byte, error) {
 	var b bytes.Buffer
 	b.WriteByte(p.Type())
 	b.WriteString(strconv.FormatUint(uint64(p.CID), 10))
@@ -128,7 +128,7 @@ type CReq struct {
 func (*CReq) Type() byte { return PID_Puncher_CReq }
 
 // error is always nil
-func (p *CReq) MarshalBinary() ([]byte, error) {
+func (p CReq) MarshalBinary() ([]byte, error) {
 	var b bytes.Buffer
 	b.WriteByte(p.Type())
 	b.WriteByte(0)
