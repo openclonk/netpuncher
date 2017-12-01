@@ -292,7 +292,7 @@ func (c *Conn) writeFragment(frag []byte, nr, fnr, size uint32) {
 func (c *Conn) Write(b []byte) (n int, err error) {
 	cnt := FragmentCnt(len(b))
 	// Allocate sequence numbers for all fragments.
-	fnr := atomic.AddUint32(&c.oPacketCounter, uint32(cnt)) - uint32(cnt) + 1
+	fnr := atomic.AddUint32(&c.oPacketCounter, uint32(cnt)) - uint32(cnt)
 	// Copy the buffer as we have to keep the data for retransmissions.
 	bc := append([]byte(nil), b...)
 	size := uint32(len(b))
