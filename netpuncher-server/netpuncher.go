@@ -1,24 +1,37 @@
 package main
 
-import "github.com/lluchs/netpuncher/c4netioudp"
-import "log"
-import "net"
+import (
+	"log"
+	"net"
+	"os"
+	"os/signal"
+
+	"github.com/lluchs/netpuncher/c4netioudp"
+)
 
 func main() {
-	listenaddr := net.UDPAddr{IP: net.IPv6unspecified, Port: 11116}
-	conn, err := net.ListenUDP("udp", &listenaddr)
+	listenaddr := net.UDPAddr{IP: net.IPv6unspecified, Port: 11115}
+	listener, err := c4netioudp.Listen("udp", &listenaddr)
 	if err != nil {
 		log.Fatal("couldn't ListenUDP", err)
 	}
+	defer listener.Close()
 	log.Println("netpuncher listening on port", listenaddr.Port)
 
-	buf := make([]byte, 1500)
-	for {
-		n, recvaddr, err := conn.ReadFromUDP(buf)
-		if err != nil {
-			log.Fatal("error while receiving", err)
+	go func() {
+		for {
+			conn, err := listener.AcceptConn()
+			if err != nil {
+				log.Fatal("error during Accept", err)
+			}
+			log.Println("got connection", conn.RemoteAddr())
+			conn.Close()
 		}
-		hdr := c4netioudp.ReadPacketHdr(buf)
-		log.Println("received", n, "byte from", recvaddr, "PacketHdr", hdr)
-	}
+	}()
+
+	// Wait for an interrupt. Without this special handling, the connection
+	// would not be closed properly.
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt)
+	<-c
 }

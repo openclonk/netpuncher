@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"container/list"
 	"fmt"
+	"io"
 	"net"
 	"sort"
 	"sync/atomic"
@@ -12,8 +13,10 @@ import (
 
 type Conn struct {
 	udp            *net.UDPConn
+	writer         io.Writer       // write packets to me!
 	raddr          *net.UDPAddr    // address we connect to
 	laddr          *net.UDPAddr    // local address as seen by server
+	rfuchan        chan rfu        // channel for receiving raw packets
 	datachan       chan []byte     // channel for complete packages
 	errchan        chan error      // channel for read errors
 	sendchan       chan sendPacket // channel for outgoing packets
@@ -21,31 +24,38 @@ type Conn struct {
 	oPacketCounter uint32          // FNr of last outgoing packet
 }
 
-func Dial(network string, laddr, raddr *net.UDPAddr) (*Conn, error) {
-	c := Conn{
-		raddr:    raddr,
+func newConn() *Conn {
+	return &Conn{
+		rfuchan:  make(chan rfu, 64),
 		datachan: make(chan []byte, 32),
 		errchan:  make(chan error),
 		sendchan: make(chan sendPacket, 64), // should never block
 		quit:     make(chan bool),
 	}
+}
+
+func Dial(network string, laddr, raddr *net.UDPAddr) (*Conn, error) {
+	c := newConn()
+	c.raddr = raddr
 	var err error
 	c.udp, err = net.DialUDP(network, laddr, raddr)
 	if err != nil {
 		return nil, err
 	}
+	c.writer = c.udp
 	if err = c.connect(); err != nil {
 		return nil, fmt.Errorf("c4netioudp: error while connecting: %v", err)
 	}
+	go readFromUDP(c.udp, c.rfuchan, c.quit)
 	go c.handlePackets()
-	return &c, nil
+	return c, nil
 }
 
 func (c *Conn) connect() error {
 	// Three-way handshake
 	// 1. ConnPacket --->
 	connpkg := NewConnPacket(*c.raddr)
-	_, err := connpkg.WriteTo(c.udp)
+	_, err := connpkg.WriteTo(c.writer)
 	if err != nil {
 		return err
 	}
@@ -73,7 +83,7 @@ func (c *Conn) connect() error {
 	// 3. ConnOkPacket --->
 	// TODO: Retransmission?
 	connokpkg := NewConnOkPacket(*recvaddr)
-	_, err = connokpkg.WriteTo(c.udp)
+	_, err = connokpkg.WriteTo(c.writer)
 	if err != nil {
 		return err
 	}
@@ -100,13 +110,6 @@ func (p *recvPacket) assemble(fnr uint32) []byte {
 	return buf
 }
 
-// Return value from ReadFromUDP
-type rfu struct {
-	buf []byte
-	n   int
-	err error
-}
-
 // Interval Check packets are sent in
 const checkInterval = 1 * time.Second
 
@@ -114,19 +117,6 @@ const checkInterval = 1 * time.Second
 const maxAsks = 10
 
 func (c *Conn) handlePackets() {
-	rfuchan := make(chan rfu)
-	go func() {
-		for {
-			var r rfu
-			r.buf = make([]byte, 1500)
-			r.n, _, r.err = c.udp.ReadFromUDP(r.buf)
-			select {
-			case rfuchan <- r: // ok
-			case <-c.quit:
-				return
-			}
-		}
-	}()
 	ticker := time.NewTicker(checkInterval)
 	dpackets := make(map[uint32]*recvPacket)
 	sendPackets := list.New()
@@ -159,8 +149,8 @@ func (c *Conn) handlePackets() {
 				}
 			}
 			check := NewCheckPacketHdr(asks, IPacketCounter, c.oPacketCounter)
-			_, _ = check.WriteTo(c.udp)
-		case r := <-rfuchan:
+			_, _ = check.WriteTo(c.writer)
+		case r := <-c.rfuchan:
 			if r.err != nil {
 				c.errchan <- r.err
 				continue
@@ -176,7 +166,7 @@ func (c *Conn) handlePackets() {
 			case IPID_Ping:
 				// Reply to ping, ignore errors.
 				ping := PacketHdr{StatusByte: IPID_Ping}
-				_, _ = ping.WriteTo(c.udp)
+				_, _ = ping.WriteTo(c.writer)
 			case IPID_Data:
 				if r.n < DataPacketHdrSize {
 					continue
@@ -285,7 +275,7 @@ func (c *Conn) writeFragment(frag []byte, nr, fnr, size uint32) {
 	var buf bytes.Buffer
 	datapkt.WriteTo(&buf)
 	buf.Write(frag)
-	buf.WriteTo(c.udp)
+	buf.WriteTo(c.writer)
 }
 
 // Write a full message to c.
@@ -323,8 +313,12 @@ func (c *Conn) Close() error {
 	close(c.quit)
 	// Send IPID_Close packet to server
 	closePacket := NewClosePacket(*c.raddr)
-	_, _ = closePacket.WriteTo(c.udp)
-	return c.udp.Close()
+	_, _ = closePacket.WriteTo(c.writer)
+	if c.writer == c.udp {
+		return c.udp.Close()
+	}
+	// We don't own the UDP socket, so we don't have to close it.
+	return nil
 }
 
 func (c *Conn) LocalAddr() net.Addr {
@@ -332,7 +326,7 @@ func (c *Conn) LocalAddr() net.Addr {
 }
 
 func (c *Conn) RemoteAddr() net.Addr {
-	return c.udp.RemoteAddr()
+	return c.raddr
 }
 
 func (c *Conn) SetDeadline(t time.Time) error {
