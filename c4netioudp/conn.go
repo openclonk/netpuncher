@@ -262,6 +262,8 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 		return len(data), nil
 	case err = <-c.errchan:
 		return
+	case <-c.quit:
+		return 0, fmt.Errorf("connection closed")
 	}
 }
 
