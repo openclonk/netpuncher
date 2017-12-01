@@ -1,6 +1,8 @@
 package netpuncher
 
 import (
+	"bytes"
+	"encoding"
 	"fmt"
 	"io"
 	"net"
@@ -19,7 +21,7 @@ const MaxPacketSize = 1 + 50
 
 type PuncherPacket interface {
 	Type() byte
-	//encoding.BinaryMarshaler
+	encoding.BinaryMarshaler
 }
 
 // Encountered an unknown message type while decoding.
@@ -43,7 +45,7 @@ func (n ErrNotReadEnough) Error() string {
 	return fmt.Sprintf("netpuncher: message not long enough, read %d byte", n)
 }
 
-var addrRegexp = regexp.MustCompile(`^UDP([0-9\.]+|\[[0-9a-f:]*\]):([0-9]+)$`)
+var addrRegexp = regexp.MustCompile("^\x00" + `([0-9\.]+|\[[0-9a-f:\.]+\]):([0-9]+)` + "\x00$")
 
 // Reads one puncher message.
 func ReadFrom(r io.Reader) (PuncherPacket, error) {
@@ -97,14 +99,40 @@ type AssID struct {
 
 func (*AssID) Type() byte { return PID_Puncher_AssID }
 
+// error is always nil
+func (p *AssID) MarshalBinary() ([]byte, error) {
+	var b bytes.Buffer
+	b.WriteByte(p.Type())
+	b.WriteString(strconv.FormatUint(uint64(p.CID), 10))
+	return b.Bytes(), nil
+}
+
 type SReq struct {
 	CID uint32
 }
 
 func (*SReq) Type() byte { return PID_Puncher_SReq }
 
+// error is always nil
+func (p *SReq) MarshalBinary() ([]byte, error) {
+	var b bytes.Buffer
+	b.WriteByte(p.Type())
+	b.WriteString(strconv.FormatUint(uint64(p.CID), 10))
+	return b.Bytes(), nil
+}
+
 type CReq struct {
 	Addr net.UDPAddr
 }
 
 func (*CReq) Type() byte { return PID_Puncher_CReq }
+
+// error is always nil
+func (p *CReq) MarshalBinary() ([]byte, error) {
+	var b bytes.Buffer
+	b.WriteByte(p.Type())
+	b.WriteByte(0)
+	b.WriteString(p.Addr.String())
+	b.WriteByte(0)
+	return b.Bytes(), nil
+}
