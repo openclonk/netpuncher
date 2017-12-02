@@ -21,7 +21,7 @@ func (c *Conn) handlePackets(req chan<- punchReq, close chan<- uint32) {
 	for {
 		msg, err := netpuncher.ReadFrom(c.c)
 		if reason, ok := err.(c4netioudp.ErrConnectionClosed); ok {
-			log.Printf("close: %v #%d (%s)\n", c.c.RemoteAddr(), c.id, reason)
+			log.Printf("close:   %v #%d (%s)\n", c.c.RemoteAddr(), c.id, reason)
 			c.c.Close()
 			close <- c.id
 			return
