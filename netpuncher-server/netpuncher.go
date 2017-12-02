@@ -31,14 +31,14 @@ func (c *Conn) handlePackets(req chan<- punchReq, close chan<- uint32) {
 		}
 		switch np := msg.(type) {
 		case *netpuncher.SReq:
-			req <- punchReq{np.CID, c.c.RemoteAddr().(*net.UDPAddr)}
+			req <- punchReq{np.CID, c}
 		}
 	}
 }
 
 type punchReq struct {
 	id   uint32
-	addr *net.UDPAddr
+	conn *Conn
 }
 
 func main() {
@@ -77,10 +77,17 @@ func main() {
 				conn.Write(buf)
 				log.Printf("connect: %v #%d\n", conn.RemoteAddr(), id)
 			case r := <-req:
-				if c, ok := conns[r.id]; ok {
-					buf, _ := netpuncher.CReq{*r.addr}.MarshalBinary()
-					c.c.Write(buf)
-					log.Printf("CReq: %d ---> %v\n", r.id, r.addr)
+				// The client (r.conn) requests punching from the host (r.id). We will send a
+				// CReq message to both parties.
+				client := r.conn
+				if host, ok := conns[r.id]; ok {
+					caddr := client.c.RemoteAddr().(*net.UDPAddr)
+					haddr := host.c.RemoteAddr().(*net.UDPAddr)
+					buf, _ := netpuncher.CReq{*caddr}.MarshalBinary()
+					host.c.Write(buf)
+					buf, _ = netpuncher.CReq{*haddr}.MarshalBinary()
+					client.c.Write(buf)
+					log.Printf("CReq: client %v <--> host %v #%d\n", caddr, haddr, r.id)
 				}
 			case id := <-closech:
 				delete(conns, id)
