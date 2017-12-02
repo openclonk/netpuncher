@@ -116,10 +116,16 @@ func (p *recvPacket) assemble(fnr uint32) []byte {
 // Interval Check packets are sent in
 const checkInterval = 1 * time.Second
 
+// Connection timeout for established connections
+// Usually, each side sends Check packets each second (see `checkInterval`), so
+// not sending any data isn't an issue.
+const connectionTimeout = 30 * time.Second
+
 // Maximum number of asks per Check packet
 const maxAsks = 10
 
 func (c *Conn) handlePackets() {
+	timeout := time.NewTimer(connectionTimeout)
 	ticker := time.NewTicker(checkInterval)
 	dpackets := make(map[uint32]*recvPacket)
 	sendPackets := list.New()
@@ -153,6 +159,9 @@ func (c *Conn) handlePackets() {
 			}
 			check := NewCheckPacketHdr(asks, IPacketCounter, c.oPacketCounter)
 			_, _ = check.WriteTo(c.writer)
+		case <-timeout.C:
+			// Peer seems to be down, close connection.
+			c.Close()
 		case r := <-c.rfuchan:
 			if r.err != nil {
 				c.errchan <- r.err
@@ -236,7 +245,15 @@ func (c *Conn) handlePackets() {
 			case IPID_Close:
 				// TODO: Decode packet and check Addr
 				c.Close()
+			default:
+				continue
 			}
+			// Reset connection timeout. Note that we only reach this code for
+			// packets handled above.
+			if !timeout.Stop() {
+				<-timeout.C
+			}
+			timeout.Reset(connectionTimeout)
 		case pkt := <-c.sendchan:
 			// Save the packet for potential retransmission later on.
 			// Insert in the right spot which may not be at the end (race
