@@ -3,7 +3,6 @@ package c4netioudp
 import (
 	"bytes"
 	"container/list"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -12,7 +11,9 @@ import (
 	"time"
 )
 
-var ErrConnectionClosed = errors.New("connection closed")
+type ErrConnectionClosed string
+
+func (reason ErrConnectionClosed) Error() string { return string(reason) }
 
 type Conn struct {
 	udp            *net.UDPConn
@@ -24,6 +25,7 @@ type Conn struct {
 	errchan        chan error      // channel for read errors
 	sendchan       chan sendPacket // channel for outgoing packets
 	quit           chan bool       // closed to signal goroutines
+	closereason    string          // reason the connection was closed
 	oPacketCounter uint32          // FNr of last outgoing packet
 }
 
@@ -161,6 +163,7 @@ func (c *Conn) handlePackets() {
 			_, _ = check.WriteTo(c.writer)
 		case <-timeout.C:
 			// Peer seems to be down, close connection.
+			c.closereason = "connection timeout"
 			c.Close()
 		case r := <-c.rfuchan:
 			if r.err != nil {
@@ -244,6 +247,7 @@ func (c *Conn) handlePackets() {
 				}
 			case IPID_Close:
 				// TODO: Decode packet and check Addr
+				c.closereason = "connection closed by peer"
 				c.Close()
 			default:
 				continue
@@ -283,7 +287,7 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 	case err = <-c.errchan:
 		return
 	case <-c.quit:
-		return 0, ErrConnectionClosed
+		return 0, ErrConnectionClosed(c.closereason)
 	}
 }
 
@@ -302,6 +306,11 @@ func (c *Conn) writeFragment(frag []byte, nr, fnr, size uint32) {
 
 // Write a full message to c.
 func (c *Conn) Write(b []byte) (n int, err error) {
+	select {
+	case <-c.quit:
+		return 0, ErrConnectionClosed(c.closereason)
+	default:
+	}
 	cnt := FragmentCnt(len(b))
 	// Allocate sequence numbers for all fragments.
 	fnr := atomic.AddUint32(&c.oPacketCounter, uint32(cnt)) - uint32(cnt)
@@ -329,10 +338,13 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 func (c *Conn) Close() error {
 	select {
 	case <-c.quit:
-		return fmt.Errorf("connection was already closed")
+		return ErrConnectionClosed(c.closereason)
 	default:
 	}
 	close(c.quit)
+	if c.closereason == "" {
+		c.closereason = "connection closed locally"
+	}
 	// Send IPID_Close packet to server
 	closePacket := NewClosePacket(*c.raddr)
 	_, _ = closePacket.WriteTo(c.writer)

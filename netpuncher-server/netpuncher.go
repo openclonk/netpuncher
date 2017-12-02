@@ -20,13 +20,13 @@ type Conn struct {
 func (c *Conn) handlePackets(req chan<- punchReq, close chan<- uint32) {
 	for {
 		msg, err := netpuncher.ReadFrom(c.c)
-		if err == c4netioudp.ErrConnectionClosed {
-			log.Printf("close: %v #%d\n", c.c.RemoteAddr(), c.id)
+		if reason, ok := err.(c4netioudp.ErrConnectionClosed); ok {
+			log.Printf("close: %v #%d (%s)\n", c.c.RemoteAddr(), c.id, reason)
 			c.c.Close()
 			close <- c.id
 			return
 		} else if err != nil {
-			log.Printf("couldn't read packet:", err)
+			log.Printf("couldn't read packet: %v", err)
 			continue
 		}
 		switch np := msg.(type) {
