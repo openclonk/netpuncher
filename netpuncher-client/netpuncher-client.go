@@ -14,21 +14,33 @@ import (
 
 var host = flag.Bool("host", false, "simulate host behavior")
 var client = flag.Int("client", -1, "simulate client joining a host with given id")
+var v4 = flag.Bool("4", false, "use IPv4")
+var v6 = flag.Bool("6", false, "use IPv6")
 
 func main() {
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: %s [options] <netpuncher address>\n", os.Args[0])
+		flag.PrintDefaults()
+	}
 	flag.Parse()
 	if flag.NArg() != 1 {
-		fmt.Println("Usage:", os.Args[0], "[options] <netpuncher address>")
-		flag.PrintDefaults()
-		os.Exit(1)
+		flag.Usage()
+		os.Exit(2)
 	}
 
-	raddr, err := net.ResolveUDPAddr("udp", flag.Arg(0))
+	network := "udp"
+	if *v4 {
+		network = "udp4"
+	}
+	if *v6 {
+		network = "udp6"
+	}
+	raddr, err := net.ResolveUDPAddr(network, flag.Arg(0))
 	if err != nil {
 		fmt.Println("invalid address", err)
 		os.Exit(1)
 	}
-	conn, err := c4netioudp.Dial("udp", nil, raddr)
+	conn, err := c4netioudp.Dial(network, nil, raddr)
 	if err != nil {
 		fmt.Println("couldn't Dial", err)
 		os.Exit(1)
