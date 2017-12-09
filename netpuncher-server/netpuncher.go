@@ -73,7 +73,7 @@ func main() {
 				c := &Conn{id, conn}
 				conns[id] = c
 				go c.handlePackets(req, closech)
-				buf, _ := netpuncher.AssID{id}.MarshalBinary()
+				buf, _ := netpuncher.AssID{CID: id}.MarshalBinary()
 				conn.Write(buf)
 				log.Printf("connect: %v #%d\n", conn.RemoteAddr(), id)
 			case r := <-req:
@@ -83,9 +83,9 @@ func main() {
 				if host, ok := conns[r.id]; ok {
 					caddr := client.c.RemoteAddr().(*net.UDPAddr)
 					haddr := host.c.RemoteAddr().(*net.UDPAddr)
-					buf, _ := netpuncher.CReq{*caddr}.MarshalBinary()
+					buf, _ := netpuncher.CReq{Addr: *caddr}.MarshalBinary()
 					host.c.Write(buf)
-					buf, _ = netpuncher.CReq{*haddr}.MarshalBinary()
+					buf, _ = netpuncher.CReq{Addr: *haddr}.MarshalBinary()
 					client.c.Write(buf)
 					log.Printf("CReq: client %v <--> host %v #%d\n", caddr, haddr, r.id)
 				}

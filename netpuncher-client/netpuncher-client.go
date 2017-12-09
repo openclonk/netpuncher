@@ -69,7 +69,7 @@ func main() {
 
 	if *client >= 0 {
 		// Request punching for the given host id.
-		sreq := netpuncher.SReq{uint32(*client)}
+		sreq := netpuncher.SReq{CID: uint32(*client)}
 		b, _ := sreq.MarshalBinary()
 		conn.Write(b)
 		fmt.Printf("-> %T: %+v\n", sreq, sreq)
