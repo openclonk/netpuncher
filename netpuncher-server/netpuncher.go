@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"time"
 
 	"github.com/lluchs/netpuncher"
@@ -63,12 +64,15 @@ type punchReq struct {
 
 func main() {
 	listenaddr := net.UDPAddr{IP: net.IPv6unspecified, Port: 11115}
+	if p, err := strconv.Atoi(os.Getenv("PORT")); err == nil {
+		listenaddr.Port = p
+	}
 	listener, err := c4netioudp.Listen("udp", &listenaddr)
 	if err != nil {
 		log.Fatal("couldn't ListenUDP", err)
 	}
 	defer listener.Close()
-	log.Println("netpuncher listening on port", listenaddr.Port)
+	log.Printf("netpuncher listening on %v", listener.Addr())
 
 	rand.Seed(time.Now().UnixNano())
 
