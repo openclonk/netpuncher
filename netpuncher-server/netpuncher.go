@@ -13,24 +13,44 @@ import (
 )
 
 type Conn struct {
-	id uint32
-	c  *c4netioudp.Conn
+	id      uint32
+	c       *c4netioudp.Conn
+	version netpuncher.ProtocolVersion
+}
+
+func (c *Conn) npHeader() netpuncher.Header {
+	return netpuncher.Header{Version: c.version}
 }
 
 func (c *Conn) handlePackets(req chan<- punchReq, close chan<- uint32) {
 	for {
 		msg, err := netpuncher.ReadFrom(c.c)
-		if reason, ok := err.(c4netioudp.ErrConnectionClosed); ok {
-			log.Printf("close:   %v #%d (%s)\n", c.c.RemoteAddr(), c.id, reason)
+		switch errt := err.(type) {
+		case c4netioudp.ErrConnectionClosed:
+			log.Printf("close:   %v #%d (%s)\n", c.c.RemoteAddr(), c.id, errt)
 			c.c.Close()
 			close <- c.id
 			return
-		} else if err != nil {
+		case netpuncher.ErrUnsupportedVersion:
+			log.Printf("client #%d: unsupported version %d", c.id, errt)
+			c.c.Close()
+			continue
+		case nil: // ok
+		default:
 			log.Printf("couldn't read packet: %v", err)
 			continue
 		}
 		switch np := msg.(type) {
+		case *netpuncher.IDReq:
+			c.version = np.Header.Version
+			buf, err := netpuncher.AssID{Header: c.npHeader(), CID: c.id}.MarshalBinary()
+			if err != nil {
+				log.Printf("AssID.MarshalBinary(): %v", err)
+			}
+			c.c.Write(buf)
+			log.Printf("host: #%d", c.id)
 		case *netpuncher.SReq:
+			c.version = np.Header.Version
 			req <- punchReq{np.CID, c}
 		}
 	}
@@ -70,11 +90,9 @@ func main() {
 			select {
 			case conn := <-connch:
 				id := rand.Uint32()
-				c := &Conn{id, conn}
+				c := &Conn{id: id, c: conn}
 				conns[id] = c
 				go c.handlePackets(req, closech)
-				buf, _ := netpuncher.AssID{CID: id}.MarshalBinary()
-				conn.Write(buf)
 				log.Printf("connect: %v #%d\n", conn.RemoteAddr(), id)
 			case r := <-req:
 				// The client (r.conn) requests punching from the host (r.id). We will send a
@@ -83,9 +101,17 @@ func main() {
 				if host, ok := conns[r.id]; ok {
 					caddr := client.c.RemoteAddr().(*net.UDPAddr)
 					haddr := host.c.RemoteAddr().(*net.UDPAddr)
-					buf, _ := netpuncher.CReq{Addr: *caddr}.MarshalBinary()
+					buf, err := netpuncher.CReq{Header: host.npHeader(), Addr: *caddr}.MarshalBinary()
+					if err != nil {
+						log.Printf("CReq.MarshalBinary(): %v", err)
+						continue
+					}
 					host.c.Write(buf)
-					buf, _ = netpuncher.CReq{Addr: *haddr}.MarshalBinary()
+					buf, err = netpuncher.CReq{Header: client.npHeader(), Addr: *haddr}.MarshalBinary()
+					if err != nil {
+						log.Printf("CReq.MarshalBinary(): %v", err)
+						continue
+					}
 					client.c.Write(buf)
 					log.Printf("CReq: client %v <--> host %v #%d\n", caddr, haddr, r.id)
 				}

@@ -55,36 +55,42 @@ func main() {
 	//}
 	//fmt.Println("sent", n, "byte")
 
-	msg, err := netpuncher.ReadFrom(conn)
-	if err != nil {
-		fmt.Println("error while reading", err)
-		os.Exit(1)
-	}
-	switch np := msg.(type) {
-	case *netpuncher.AssID:
-		fmt.Printf("CID = %d\n", np.CID)
-	default:
-		fmt.Printf("got unexpected message type 0x%x %T: %+v\n", msg.Type(), msg, msg)
-	}
+	// The following uses version 1 of the netpuncher protocol.
+	header := netpuncher.Header{Version: 1}
 
 	if *client >= 0 {
 		// Request punching for the given host id.
-		sreq := netpuncher.SReq{CID: uint32(*client)}
-		b, _ := sreq.MarshalBinary()
+		sreq := netpuncher.SReq{Header: header, CID: uint32(*client)}
+		b, err := sreq.MarshalBinary()
+		if err != nil {
+			panic(err)
+		}
 		conn.Write(b)
 		fmt.Printf("-> %T: %+v\n", sreq, sreq)
 		time.Sleep(1 * time.Second)
 	}
 
 	if *host {
+		// Request an ID.
+		b, err := netpuncher.IDReq{Header: header}.MarshalBinary()
+		if err != nil {
+			panic(err)
+		}
+		conn.Write(b)
+		// Handle and print incoming messages.
 		go func() {
 			for {
 				msg, err := netpuncher.ReadFrom(conn)
 				if err != nil {
-					fmt.Println("error while reading", err)
+					fmt.Println("error while reading:", err)
 					os.Exit(1)
 				}
-				fmt.Printf("<- %T: %+v\n", msg, msg)
+				switch np := msg.(type) {
+				case *netpuncher.AssID:
+					fmt.Printf("CID = %d\n", np.CID)
+				default:
+					fmt.Printf("<- %T: %+v\n", msg, msg)
+				}
 				// TODO: Respond to CReq
 			}
 		}()
