@@ -1,6 +1,7 @@
 package netpuncher
 
 import (
+	"bytes"
 	"net"
 	"reflect"
 	"testing"
@@ -29,6 +30,21 @@ func TestMarshalRoundtrip(t *testing.T) {
 		}
 		if !reflect.DeepEqual(pkt, cpy) {
 			t.Errorf("%T packets not equal: %+v != %+v", pkt, pkt, cpy)
+		}
+	}
+}
+
+// Test unmarshalling fake packets with an unsupported version.
+func TestUnsupportedVersion(t *testing.T) {
+	buf := make([]byte, 100)
+	buf[1] = 0xff
+	types := []byte{PID_Puncher_IDReq, PID_Puncher_AssID, PID_Puncher_SReq, PID_Puncher_CReq}
+	for _, typ := range types {
+		buf[0] = typ
+		r := bytes.NewReader(buf)
+		_, err := ReadFrom(r)
+		if _, ok := err.(ErrUnsupportedVersion); !ok {
+			t.Errorf("unexpected error: %v", err)
 		}
 	}
 }

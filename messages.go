@@ -55,6 +55,13 @@ func (t ErrUnknownType) Error() string {
 	return fmt.Sprintf("netpuncher: unknown message type 0x%x", t)
 }
 
+// Message has an unsupported protocol version
+type ErrUnsupportedVersion ProtocolVersion
+
+func (v ErrUnsupportedVersion) Error() string {
+	return fmt.Sprintf("netpuncher: unsupported protocol version %d", int(v))
+}
+
 // Message not properly formatted.
 type ErrInvalidMessage string
 
@@ -93,15 +100,25 @@ func ReadFrom(r io.Reader) (PuncherPacket, error) {
 		return nil, ErrUnknownType(buf[0])
 	}
 	if err = p.UnmarshalBinary(buf); err != nil {
-		return nil, ErrInvalidMessage(err.Error())
+		return nil, err
 	}
 	return p, nil
+}
+
+type ProtocolVersion byte
+
+// Newest version supported
+var NewestProtocolVersion = ProtocolVersion(1)
+
+// Returns whether the implementation supports the protocol version.
+func (v ProtocolVersion) Supported() bool {
+	return v == 1
 }
 
 // Header preceding all messages.
 type Header struct {
 	Type    byte // See PID_Puncher_* constants
-	Version byte // Protocol version
+	Version ProtocolVersion
 }
 
 func (h Header) MarshalBinary() ([]byte, error) {
@@ -114,7 +131,10 @@ func (h *Header) UnmarshalBinary(buf []byte) error {
 	b := bytes.NewReader(buf)
 	err := binary.Read(b, binary.LittleEndian, h)
 	if err != nil {
-		return err
+		return ErrInvalidMessage(err.Error())
+	}
+	if !h.Version.Supported() {
+		return ErrUnsupportedVersion(h.Version)
 	}
 	return nil
 }
@@ -136,7 +156,10 @@ func (p *IDReq) UnmarshalBinary(buf []byte) error {
 	b := bytes.NewReader(buf)
 	err := binary.Read(b, binary.LittleEndian, p)
 	if err != nil {
-		return err
+		return ErrInvalidMessage(err.Error())
+	}
+	if !p.Header.Version.Supported() {
+		return ErrUnsupportedVersion(p.Header.Version)
 	}
 	return nil
 }
@@ -160,7 +183,10 @@ func (p *AssID) UnmarshalBinary(buf []byte) error {
 	b := bytes.NewReader(buf)
 	err := binary.Read(b, binary.LittleEndian, p)
 	if err != nil {
-		return err
+		return ErrInvalidMessage(err.Error())
+	}
+	if !p.Header.Version.Supported() {
+		return ErrUnsupportedVersion(p.Header.Version)
 	}
 	return nil
 }
@@ -184,7 +210,10 @@ func (p *SReq) UnmarshalBinary(buf []byte) error {
 	b := bytes.NewReader(buf)
 	err := binary.Read(b, binary.LittleEndian, p)
 	if err != nil {
-		return err
+		return ErrInvalidMessage(err.Error())
+	}
+	if !p.Header.Version.Supported() {
+		return ErrUnsupportedVersion(p.Header.Version)
 	}
 	return nil
 }
@@ -214,15 +243,18 @@ func (p CReq) MarshalBinary() ([]byte, error) {
 func (p *CReq) UnmarshalBinary(buf []byte) error {
 	b := bytes.NewReader(buf)
 	if err := binary.Read(b, binary.LittleEndian, &p.Header); err != nil {
-		return err
+		return ErrInvalidMessage(err.Error())
+	}
+	if !p.Header.Version.Supported() {
+		return ErrUnsupportedVersion(p.Header.Version)
 	}
 	var port uint16
 	if err := binary.Read(b, binary.LittleEndian, &port); err != nil {
-		return err
+		return ErrInvalidMessage(err.Error())
 	}
 	var ip [16]byte
 	if err := binary.Read(b, binary.LittleEndian, &ip); err != nil {
-		return err
+		return ErrInvalidMessage(err.Error())
 	}
 	p.Addr = net.UDPAddr{Port: int(port), IP: ip[:]}
 	return nil
