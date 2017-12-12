@@ -24,6 +24,7 @@ type Conn struct {
 	datachan       chan []byte     // channel for complete packages
 	errchan        chan error      // channel for read errors
 	sendchan       chan sendPacket // channel for outgoing packets
+	closechan      chan *Conn      // channel to signal closing to Listener
 	quit           chan bool       // closed to signal goroutines
 	closereason    string          // reason the connection was closed
 	oPacketCounter uint32          // FNr of last outgoing packet
@@ -351,7 +352,9 @@ func (c *Conn) Close() error {
 	if c.writer == c.udp {
 		return c.udp.Close()
 	}
-	// We don't own the UDP socket, so we don't have to close it.
+	// We don't own the UDP socket, so we don't have to close it. However,
+	// signal us closing to the listener to stop packet delivery.
+	c.closechan <- c
 	return nil
 }
 

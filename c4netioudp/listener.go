@@ -11,6 +11,7 @@ const connTimeout = 5 * time.Second // initial connection timeout (ConnPacket to
 type Listener struct {
 	udp        *net.UDPConn
 	acceptchan chan *Conn // channel for new connections
+	closechan  chan *Conn // channel to signal a closing connection
 	errchan    chan error // channel for UDP errors
 	quit       chan bool  // closed to signal goroutines
 	quithp     chan bool  // signal Close() to handlePackets()
@@ -19,6 +20,7 @@ type Listener struct {
 func Listen(network string, laddr *net.UDPAddr) (*Listener, error) {
 	l := Listener{
 		acceptchan: make(chan *Conn, 32),
+		closechan:  make(chan *Conn, 32),
 		errchan:    make(chan error),
 		quit:       make(chan bool),
 		quithp:     make(chan bool),
@@ -53,10 +55,18 @@ func (l *Listener) handlePackets() {
 		select {
 		case <-l.quithp:
 			for _, conn := range conns {
+				// Empty the closechan to make sure conn.Close() doesn't block.
+				select {
+				case <-l.closechan:
+				default:
+				}
 				conn.Close()
 			}
 			l.quithp <- true
 			return
+		case c := <-l.closechan:
+			// Remove the channel from the map of open connections.
+			delete(conns, addrkey(c.raddr))
 		case r := <-rfuchan:
 			if r.err != nil {
 				l.errchan <- r.err
@@ -85,6 +95,7 @@ func (l *Listener) handlePackets() {
 				conn.udp = l.udp
 				conn.raddr = r.addr
 				conn.writer = writer
+				conn.closechan = l.closechan
 				connsinprogress[key] = conn
 				// Connection timeout
 				go func(key udpkey) {
@@ -107,9 +118,7 @@ func (l *Listener) handlePackets() {
 				l.acceptchan <- conn
 			}
 		case key := <-conntimeout:
-			if _, ok := connsinprogress[key]; ok {
-				delete(connsinprogress, key)
-			}
+			delete(connsinprogress, key)
 		}
 	}
 }
