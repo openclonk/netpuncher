@@ -13,6 +13,58 @@ func TestSequentialConnections(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer listener.Close()
+	c1closed := make(chan bool)
+	go func() {
+		c1, _ := listener.AcceptConn()
+		c1.Read(nil)
+		c1closed <- true
+		listener.AcceptConn()
+	}()
+
+	done := make(chan bool, 1)
+	fail := make(chan error)
+	go func() {
+		raddr := listener.Addr().(*net.UDPAddr)
+		c1, err := Dial("udp", nil, raddr)
+		if err != nil {
+			t.Error(err)
+			fail <- err
+			return
+		}
+		laddr := c1.LocalAddr().(*net.UDPAddr)
+		c1.Close()
+
+		// Make sure the connection is closed properly before proceeding to
+		// prevent "address already in use" error.
+		<-c1closed
+
+		c2, err := Dial("udp", laddr, raddr)
+		if err != nil {
+			t.Error(err)
+			fail <- err
+			return
+		}
+		c2.Close()
+
+		done <- true
+	}()
+
+	select {
+	case <-done: // ok
+	case <-fail:
+		t.FailNow()
+	case <-time.After(1 * time.Second):
+		t.Fatal("timeout")
+	}
+}
+
+// Conn packet for active connection
+func TestReconnecting(t *testing.T) {
+	listener, err := Listen("udp", &net.UDPAddr{IP: net.IPv6loopback, Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
 	go func() {
 		listener.AcceptConn()
 		listener.AcceptConn()
@@ -23,18 +75,18 @@ func TestSequentialConnections(t *testing.T) {
 		raddr := listener.Addr().(*net.UDPAddr)
 		c1, err := Dial("udp", nil, raddr)
 		if err != nil {
-			t.Fatal(err)
+			t.Error(err)
+			return
 		}
 		laddr := c1.LocalAddr().(*net.UDPAddr)
-		c1.Close()
+		// Simulate a crashing client: UDP socket is released, but no Close packet.
+		c1.udp.Close()
 
-		// TODO: This is necessary because the listener also sends a Close
-		// packet which confuses the following connection attempt.
-		time.Sleep(10 * time.Millisecond)
-
+		// Second connection should succeed.
 		c2, err := Dial("udp", laddr, raddr)
 		if err != nil {
-			t.Fatal(err)
+			t.Error(err)
+			return
 		}
 		c2.Close()
 

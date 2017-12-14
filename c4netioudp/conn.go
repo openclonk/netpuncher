@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"sort"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -25,8 +26,10 @@ type Conn struct {
 	errchan        chan error      // channel for read errors
 	sendchan       chan sendPacket // channel for outgoing packets
 	closechan      chan *Conn      // channel to signal closing to Listener
+	closemutex     sync.Mutex      // mutex protecting Close()
 	quit           chan bool       // closed to signal goroutines
 	closereason    string          // reason the connection was closed
+	noclosepacket  bool            // whether to send a packet on Close()
 	oPacketCounter uint32          // FNr of last outgoing packet
 }
 
@@ -249,6 +252,7 @@ func (c *Conn) handlePackets() {
 			case IPID_Close:
 				// TODO: Decode packet and check Addr
 				c.closereason = "connection closed by peer"
+				c.noclosepacket = true
 				c.Close()
 			default:
 				continue
@@ -337,25 +341,34 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 }
 
 func (c *Conn) Close() error {
+	// Closing a channel twice panics, so we have to protect this with a mutex.
+	c.closemutex.Lock()
+	defer c.closemutex.Unlock()
 	select {
 	case <-c.quit:
 		return ErrConnectionClosed(c.closereason)
 	default:
 	}
 	close(c.quit)
+
 	if c.closereason == "" {
 		c.closereason = "connection closed locally"
 	}
-	// Send IPID_Close packet to server
-	closePacket := NewClosePacket(*c.raddr)
-	_, _ = closePacket.WriteTo(c.writer)
-	if c.writer == c.udp {
-		return c.udp.Close()
+	if !c.noclosepacket {
+		// Send IPID_Close packet to server
+		closePacket := NewClosePacket(*c.raddr)
+		_, _ = closePacket.WriteTo(c.writer)
 	}
-	// We don't own the UDP socket, so we don't have to close it. However,
-	// signal us closing to the listener to stop packet delivery.
-	c.closechan <- c
-	return nil
+	var err error
+	if c.writer == c.udp {
+		err = c.udp.Close()
+	} else {
+		// We don't own the UDP socket, so we don't have to close it.
+		// However, signal us closing to the listener to stop packet
+		// delivery.
+		c.closechan <- c
+	}
+	return err
 }
 
 func (c *Conn) LocalAddr() net.Addr {

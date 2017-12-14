@@ -74,10 +74,7 @@ func (l *Listener) handlePackets() {
 			}
 			key := addrkey(r.addr)
 			// Do we already have a connection for this address?
-			if conn, ok := conns[key]; ok {
-				conn.rfuchan <- r
-				continue
-			}
+			conn := conns[key]
 			// Decode packet to find connection attempts.
 			hdr := ReadPacketHdr(r.buf)
 			switch hdr.StatusByte & 0x7f {
@@ -85,13 +82,19 @@ func (l *Listener) handlePackets() {
 				if r.n < ConnPacketSize {
 					continue
 				}
+				if conn != nil {
+					// This is a re-connection, close the old connection.
+					conn.closereason = "reconnection"
+					conn.noclosepacket = true
+					conn.Close()
+				}
 				// There's no need to read the initial ConnPacket, the client
 				// does all version checks. We may need to read the packet here
 				// in the future to support multiple protocol versions.
 				writer := writerToUDP{l.udp, r.addr}
 				connrepkg := NewConnPacket(*r.addr)
 				connrepkg.WriteTo(writer)
-				conn := newConn()
+				conn = newConn()
 				conn.udp = l.udp
 				conn.raddr = r.addr
 				conn.writer = writer
@@ -116,6 +119,10 @@ func (l *Listener) handlePackets() {
 				conns[key] = conn
 				go conn.handlePackets()
 				l.acceptchan <- conn
+			default:
+				if conn != nil {
+					conn.rfuchan <- r
+				}
 			}
 		case key := <-conntimeout:
 			delete(connsinprogress, key)
