@@ -234,10 +234,10 @@ func NewCheckPacketHdr(ask []uint32, acknr, outacknr uint32) CheckPacketHdr {
 
 func ReadCheckPacketHdr(b []byte) (pkg CheckPacketHdr) {
 	pkg.PacketHdr = ReadPacketHdr(b)
-	AskCount := binary.LittleEndian.Uint32(b[DataPacketHdrSize:])
-	MCAskCount := binary.LittleEndian.Uint32(b[DataPacketHdrSize+4:])
-	pkg.AckNr = binary.LittleEndian.Uint32(b[DataPacketHdrSize+8:])
-	pkg.MCAckNr = binary.LittleEndian.Uint32(b[DataPacketHdrSize+12:])
+	AskCount := binary.LittleEndian.Uint32(b[PacketHdrSize:])
+	MCAskCount := binary.LittleEndian.Uint32(b[PacketHdrSize+4:])
+	pkg.AckNr = binary.LittleEndian.Uint32(b[PacketHdrSize+8:])
+	pkg.MCAckNr = binary.LittleEndian.Uint32(b[PacketHdrSize+12:])
 	// Read Ask and MCAsk arrays following the header.
 	// TODO: Verify that b is large enough.
 	pkg.Ask = make([]uint32, AskCount)
