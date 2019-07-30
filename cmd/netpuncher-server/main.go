@@ -8,9 +8,9 @@ import (
 	"os/signal"
 	"strconv"
 
-	"github.com/lluchs/netpuncher"
-	"github.com/lluchs/netpuncher/c4netioudp"
-	"github.com/lluchs/netpuncher/server"
+	"github.com/openclonk/netpuncher"
+	"github.com/openclonk/netpuncher/c4netioudp"
+	"github.com/openclonk/netpuncher/server"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"

@@ -6,8 +6,8 @@ import (
 	"net"
 	"time"
 
-	"github.com/lluchs/netpuncher"
-	"github.com/lluchs/netpuncher/c4netioudp"
+	"github.com/openclonk/netpuncher"
+	"github.com/openclonk/netpuncher/c4netioudp"
 )
 
 type Conn struct {

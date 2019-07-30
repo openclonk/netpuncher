@@ -8,8 +8,8 @@ import (
 	"os/signal"
 	"time"
 
-	"github.com/lluchs/netpuncher"
-	"github.com/lluchs/netpuncher/c4netioudp"
+	"github.com/openclonk/netpuncher"
+	"github.com/openclonk/netpuncher/c4netioudp"
 )
 
 var host = flag.Bool("host", false, "simulate host behavior")
