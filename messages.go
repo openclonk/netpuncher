@@ -52,7 +52,7 @@ type PuncherPacket interface {
 type ErrUnknownType byte
 
 func (t ErrUnknownType) Error() string {
-	return fmt.Sprintf("netpuncher: unknown message type 0x%x", t)
+	return fmt.Sprintf("netpuncher: unknown message type 0x%x", byte(t))
 }
 
 // Message has an unsupported protocol version
