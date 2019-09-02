@@ -74,26 +74,30 @@ func (c *Conn) connect() error {
 	// TODO: retries?
 	var recvaddr *net.UDPAddr
 	timeout := time.NewTimer(connTimeout)
-	select {
-	case <-timeout.C:
-		return fmt.Errorf("connection timeout")
-	case r := <-c.rfuchan:
-		if r.err != nil {
-			return r.err
+	for recvaddr == nil {
+		select {
+		case <-timeout.C:
+			return fmt.Errorf("connection timeout")
+		case r := <-c.rfuchan:
+			if r.err != nil {
+				return r.err
+			}
+			if r.n < ConnPacketSize {
+				//return fmt.Errorf("ConnPacket not large enough")
+				continue
+			}
+			hdr := ReadPacketHdr(r.buf)
+			if hdr.StatusByte != IPID_Conn {
+				//return fmt.Errorf("received unexpected packet type %d", hdr.StatusByte)
+				continue
+			}
+			connrepkg := ReadConnPacket(r.buf)
+			if connrepkg.ProtocolVer != ProtocolVer {
+				return fmt.Errorf("unsupported protocol version %d", connrepkg.ProtocolVer)
+			}
+			c.laddr = &connrepkg.Addr
+			recvaddr = r.addr
 		}
-		if r.n < ConnPacketSize {
-			return fmt.Errorf("ConnPacket not large enough")
-		}
-		hdr := ReadPacketHdr(r.buf)
-		if hdr.StatusByte != IPID_Conn {
-			return fmt.Errorf("received unexpected packet type %d", hdr.StatusByte)
-		}
-		connrepkg := ReadConnPacket(r.buf)
-		if connrepkg.ProtocolVer != ProtocolVer {
-			return fmt.Errorf("unsupported protocol version %d", connrepkg.ProtocolVer)
-		}
-		c.laddr = &connrepkg.Addr
-		recvaddr = r.addr
 	}
 
 	// 3. ConnOkPacket --->
