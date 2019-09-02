@@ -41,7 +41,11 @@ func main() {
 		fmt.Println("invalid address", err)
 		os.Exit(1)
 	}
-	laddr := net.UDPAddr{IP: net.IPv6unspecified, Port: *port}
+	ip := net.IPv6unspecified
+	if *v4 {
+		ip = net.IPv4zero
+	}
+	laddr := net.UDPAddr{IP: ip, Port: *port}
 	listener, err := c4netioudp.Listen(network, &laddr)
 	if err != nil {
 		fmt.Println("couldn't Listen: ", err)
@@ -77,8 +81,8 @@ func main() {
 		}
 		conn.Write(b)
 		fmt.Printf("-> %T: %+v\n", sreq, sreq)
-		go handleMessages(conn)
-		time.Sleep(1 * time.Second)
+		go handleMessages(listener, conn, false)
+		time.Sleep(2 * time.Second)
 	}
 
 	if *host {
@@ -88,7 +92,8 @@ func main() {
 			panic(err)
 		}
 		conn.Write(b)
-		go handleMessages(conn)
+		go handleMessages(listener, conn, true)
+		go handleConn(listener)
 		// Wait for an interrupt. Without this special handling, the connection
 		// would not be closed properly.
 		c := make(chan os.Signal, 1)
@@ -98,9 +103,9 @@ func main() {
 }
 
 // Handle and print incoming messages.
-func handleMessages(conn *c4netioudp.Conn) {
+func handleMessages(listener *c4netioudp.Listener, npconn *c4netioudp.Conn, isHost bool) {
 	for {
-		msg, err := netpuncher.ReadFrom(conn)
+		msg, err := netpuncher.ReadFrom(npconn)
 		if err != nil {
 			fmt.Println("error while reading:", err)
 			os.Exit(1)
@@ -111,11 +116,49 @@ func handleMessages(conn *c4netioudp.Conn) {
 		case *netpuncher.CReq:
 			fmt.Printf("<- %T: %+v\n", msg, msg)
 			// Send ping to the other side.
-			if err = conn.SendTest(&np.Addr); err != nil {
+			if err = npconn.SendTest(&np.Addr); err != nil {
 				fmt.Println("couldn't send test:", err)
+			}
+			if !isHost {
+				fmt.Printf("connecting to %s...\n", np.Addr.String())
+				go func() {
+					hostconn, err := listener.Dial(&np.Addr)
+					if err != nil {
+						fmt.Println("couldn't connect to host: ", err)
+						return
+					}
+					defer hostconn.Close()
+					fmt.Println("connected successfully")
+					_, err = hostconn.Write([]byte("Hello world!\n"))
+					if err != nil {
+						fmt.Println("couldn't send message to host: ", err)
+					}
+				}()
 			}
 		default:
 			fmt.Printf("<- %T: %+v\n", msg, msg)
 		}
+	}
+}
+
+// Handles new host connections.
+func handleConn(listener *c4netioudp.Listener) {
+	for {
+		conn, err := listener.AcceptConn()
+		if err != nil {
+			fmt.Println("error in Accept: ", err)
+			break
+		}
+		go func(conn *c4netioudp.Conn) {
+			defer conn.Close()
+			fmt.Printf("new connection from %s\n", conn.RemoteAddr().String())
+			var buf [100]byte
+			n, err := conn.Read(buf[:])
+			if err != nil {
+				fmt.Println("error while reading: ", err)
+				return
+			}
+			fmt.Println("received: ", string(buf[0:n]))
+		}(conn)
 	}
 }
