@@ -52,10 +52,11 @@ func Dial(network string, laddr, raddr *net.UDPAddr) (*Conn, error) {
 		return nil, err
 	}
 	c.writer = c.udp
+	go readFromUDP(c.udp, c.rfuchan, c.quit)
 	if err = c.connect(); err != nil {
+		c.quit <- true
 		return nil, fmt.Errorf("c4netioudp: error while connecting: %v", err)
 	}
-	go readFromUDP(c.udp, c.rfuchan, c.quit)
 	go c.handlePackets()
 	return c, nil
 }
@@ -70,24 +71,30 @@ func (c *Conn) connect() error {
 	}
 
 	// 2. <--- ConnPacket
-	buf := make([]byte, 1500)
-	// TODO: Timeout, retries?
-	nread, recvaddr, err := c.udp.ReadFromUDP(buf)
-	if err != nil {
-		return err
+	// TODO: retries?
+	var recvaddr *net.UDPAddr
+	timeout := time.NewTimer(connTimeout)
+	select {
+	case <-timeout.C:
+		return fmt.Errorf("connection timeout")
+	case r := <-c.rfuchan:
+		if r.err != nil {
+			return r.err
+		}
+		if r.n < ConnPacketSize {
+			return fmt.Errorf("ConnPacket not large enough")
+		}
+		hdr := ReadPacketHdr(r.buf)
+		if hdr.StatusByte != IPID_Conn {
+			return fmt.Errorf("received unexpected packet type %d", hdr.StatusByte)
+		}
+		connrepkg := ReadConnPacket(r.buf)
+		if connrepkg.ProtocolVer != ProtocolVer {
+			return fmt.Errorf("unsupported protocol version %d", connrepkg.ProtocolVer)
+		}
+		c.laddr = &connrepkg.Addr
+		recvaddr = r.addr
 	}
-	if nread < ConnPacketSize {
-		return fmt.Errorf("ConnPacket not large enough")
-	}
-	hdr := ReadPacketHdr(buf)
-	if hdr.StatusByte != IPID_Conn {
-		return fmt.Errorf("received unexpected packet type %d", hdr.StatusByte)
-	}
-	connrepkg := ReadConnPacket(buf)
-	if connrepkg.ProtocolVer != ProtocolVer {
-		return fmt.Errorf("unsupported protocol version %d", connrepkg.ProtocolVer)
-	}
-	c.laddr = &connrepkg.Addr
 
 	// 3. ConnOkPacket --->
 	// TODO: Retransmission?
@@ -184,8 +191,8 @@ func (c *Conn) handlePackets() {
 			switch hdr.StatusByte & 0x7f {
 			case IPID_Ping:
 				// Reply to ping, ignore errors.
-				ping := PacketHdr{StatusByte: IPID_Ping}
-				_, _ = ping.WriteTo(c.writer)
+				//ping := PacketHdr{StatusByte: IPID_Ping}
+				//_, _ = ping.WriteTo(c.writer)
 			case IPID_Data:
 				if r.n < DataPacketHdrSize {
 					continue
@@ -338,6 +345,17 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 		size:      size,
 	}
 	return len(b), nil
+}
+
+// SendTest sends an IPID_Test message to raddr.
+// The test packet does not have any function and will be discarded silently.
+func (c *Conn) SendTest(raddr *net.UDPAddr) error {
+	ping := PacketHdr{StatusByte: IPID_Test}
+	var buf bytes.Buffer
+	_, err := ping.WriteTo(&buf)
+	// (writing to bytes.Buffer cannot fail)
+	_, err = c.udp.WriteToUDP(buf.Bytes(), raddr)
+	return err
 }
 
 func (c *Conn) Close() error {

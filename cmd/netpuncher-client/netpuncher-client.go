@@ -14,6 +14,7 @@ import (
 
 var host = flag.Bool("host", false, "simulate host behavior")
 var client = flag.Int("client", -1, "simulate client joining a host with given id")
+var port = flag.Int("port", 0, "local port to use (default: random)")
 var v4 = flag.Bool("4", false, "use IPv4")
 var v6 = flag.Bool("6", false, "use IPv6")
 
@@ -40,12 +41,21 @@ func main() {
 		fmt.Println("invalid address", err)
 		os.Exit(1)
 	}
-	conn, err := c4netioudp.Dial(network, nil, raddr)
+	laddr := net.UDPAddr{IP: net.IPv6unspecified, Port: *port}
+	listener, err := c4netioudp.Listen(network, &laddr)
 	if err != nil {
-		fmt.Println("couldn't Dial", err)
+		fmt.Println("couldn't Listen: ", err)
+		os.Exit(1)
+	}
+	defer listener.Close()
+
+	conn, err := listener.Dial(raddr)
+	if err != nil {
+		fmt.Println("couldn't Dial: ", err)
 		os.Exit(1)
 	}
 	defer conn.Close()
+
 	//fmt.Println("sending ping")
 	//ping := c4netioudp.PacketHdr{StatusByte: c4netioudp.IPID_Ping}
 	//n, err := ping.WriteTo(conn)
@@ -67,6 +77,7 @@ func main() {
 		}
 		conn.Write(b)
 		fmt.Printf("-> %T: %+v\n", sreq, sreq)
+		go handleMessages(conn)
 		time.Sleep(1 * time.Second)
 	}
 
@@ -77,27 +88,34 @@ func main() {
 			panic(err)
 		}
 		conn.Write(b)
-		// Handle and print incoming messages.
-		go func() {
-			for {
-				msg, err := netpuncher.ReadFrom(conn)
-				if err != nil {
-					fmt.Println("error while reading:", err)
-					os.Exit(1)
-				}
-				switch np := msg.(type) {
-				case *netpuncher.AssID:
-					fmt.Printf("CID = %d\n", np.CID)
-				default:
-					fmt.Printf("<- %T: %+v\n", msg, msg)
-				}
-				// TODO: Respond to CReq
-			}
-		}()
+		go handleMessages(conn)
 		// Wait for an interrupt. Without this special handling, the connection
 		// would not be closed properly.
 		c := make(chan os.Signal, 1)
 		signal.Notify(c, os.Interrupt)
 		<-c
+	}
+}
+
+// Handle and print incoming messages.
+func handleMessages(conn *c4netioudp.Conn) {
+	for {
+		msg, err := netpuncher.ReadFrom(conn)
+		if err != nil {
+			fmt.Println("error while reading:", err)
+			os.Exit(1)
+		}
+		switch np := msg.(type) {
+		case *netpuncher.AssID:
+			fmt.Printf("CID = %d\n", np.CID)
+		case *netpuncher.CReq:
+			fmt.Printf("<- %T: %+v\n", msg, msg)
+			// Send ping to the other side.
+			if err = conn.SendTest(&np.Addr); err != nil {
+				fmt.Println("couldn't send test:", err)
+			}
+		default:
+			fmt.Printf("<- %T: %+v\n", msg, msg)
+		}
 	}
 }

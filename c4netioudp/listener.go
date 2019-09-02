@@ -12,6 +12,7 @@ type Listener struct {
 	udp        *net.UDPConn
 	acceptchan chan *Conn // channel for new connections
 	closechan  chan *Conn // channel to signal a closing connection
+	dialchan   chan *Conn // channel for new outgoing connections
 	errchan    chan error // channel for UDP errors
 	quit       chan bool  // closed to signal goroutines
 	quithp     chan bool  // signal Close() to handlePackets()
@@ -21,6 +22,7 @@ func Listen(network string, laddr *net.UDPAddr) (*Listener, error) {
 	l := Listener{
 		acceptchan: make(chan *Conn, 32),
 		closechan:  make(chan *Conn, 32),
+		dialchan:   make(chan *Conn),
 		errchan:    make(chan error),
 		quit:       make(chan bool),
 		quithp:     make(chan bool),
@@ -47,8 +49,10 @@ func (l *Listener) handlePackets() {
 	go readFromUDP(l.udp, rfuchan, l.quit)
 	// fully opened connections
 	conns := make(map[udpkey]*Conn)
-	// connections where we're still waiting for ConnOk
+	// incoming connections where we're still waiting for ConnOk
 	connsinprogress := make(map[udpkey]*Conn)
+	// outgoing connections - managed in Dial() and Conn
+	dials := make(map[udpkey]*Conn)
 	// connection timeouts
 	conntimeout := make(chan udpkey)
 	for {
@@ -66,13 +70,22 @@ func (l *Listener) handlePackets() {
 			return
 		case c := <-l.closechan:
 			// Remove the channel from the map of open connections.
-			delete(conns, addrkey(c.raddr))
+			key := addrkey(c.raddr)
+			delete(conns, key)
+			delete(dials, key)
+		case c := <-l.dialchan:
+			dials[addrkey(c.raddr)] = c
 		case r := <-rfuchan:
 			if r.err != nil {
 				l.errchan <- r.err
 				continue
 			}
 			key := addrkey(r.addr)
+			// Dials are always managed externally.
+			if dial, ok := dials[key]; ok {
+				dial.rfuchan <- r
+				continue
+			}
 			// Do we already have a connection for this address?
 			conn := conns[key]
 			// Decode packet to find connection attempts.
@@ -143,6 +156,22 @@ func (l *Listener) AcceptConn() (*Conn, error) {
 
 func (l *Listener) Accept() (net.Conn, error) {
 	return l.AcceptConn()
+}
+
+func (l *Listener) Dial(raddr *net.UDPAddr) (*Conn, error) {
+	writer := writerToUDP{l.udp, raddr}
+	conn := newConn()
+	conn.udp = l.udp
+	conn.raddr = raddr
+	conn.writer = writer
+	conn.closechan = l.closechan
+	// Register with packet handler so that forwarding works.
+	l.dialchan <- conn
+	if err := conn.connect(); err != nil {
+		return nil, fmt.Errorf("c4netioudp: error while connecting: %v", err)
+	}
+	go conn.handlePackets()
+	return conn, nil
 }
 
 func (l *Listener) Close() error {
