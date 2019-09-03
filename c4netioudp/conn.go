@@ -10,7 +10,11 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/apex/log"
 )
+
+const connRetransmissionTimeout = 500 * time.Millisecond
 
 type ErrConnectionClosed string
 
@@ -61,12 +65,54 @@ func Dial(network string, laddr, raddr *net.UDPAddr) (*Conn, error) {
 	return c, nil
 }
 
+// punch sends packets over the connection until we receive something or the
+// timeout is reached.
+func (c *Conn) punch(timeout, interval time.Duration) error {
+	timeouttimer := time.NewTimer(timeout)
+	intervaltimer := time.NewTimer(interval)
+	sendTest := func() {
+		err := c.SendTest(c.raddr)
+		if err != nil {
+			// I'm sometimes getting `sendto: operation not permitted` errors
+			// here that seem to be transient. Just log and ignore all errors.
+			// Real errors will run into the timeout.
+			log.WithError(err).WithField("raddr", c.raddr.String()).Debug("punch: send error")
+		}
+	}
+	for {
+		select {
+		case <-intervaltimer.C:
+			log.WithField("raddr", c.raddr.String()).Debug("punch: sending")
+			sendTest()
+			intervaltimer.Reset(interval)
+		case <-timeouttimer.C:
+			log.WithField("raddr", c.raddr.String()).Debug("punch: timeout")
+			return fmt.Errorf("timeout")
+		case r := <-c.rfuchan:
+			if r.err != nil {
+				return r.err
+			}
+			log.WithField("raddr", c.raddr.String()).Debug("punch: success")
+			// We received something, so we've punched through - the actual content doesn't matter.
+			// Send one more message to signal the other side.
+			sendTest()
+			return nil
+		}
+	}
+
+}
+
+// connect establishes a connection to another server.
 func (c *Conn) connect() error {
 	// Three-way handshake
 	// 1. ConnPacket --->
-	connpkg := NewConnPacket(*c.raddr)
-	_, err := connpkg.WriteTo(c.writer)
-	if err != nil {
+	sendConnPacket := func() error {
+		log.WithField("raddr", c.raddr.String()).Debug("connect: -> ConnPacket")
+		connpkg := NewConnPacket(*c.raddr)
+		_, err := connpkg.WriteTo(c.writer)
+		return err
+	}
+	if err := sendConnPacket(); err != nil {
 		return err
 	}
 
@@ -74,20 +120,34 @@ func (c *Conn) connect() error {
 	// TODO: retries?
 	var recvaddr *net.UDPAddr
 	timeout := time.NewTimer(connTimeout)
+	retrTimer := time.NewTimer(connRetransmissionTimeout)
 	for recvaddr == nil {
 		select {
 		case <-timeout.C:
 			return fmt.Errorf("connection timeout")
+		case <-retrTimer.C:
+			// Retransmit the initial packet in case it went missing.
+			if err := sendConnPacket(); err != nil {
+				return err
+			}
 		case r := <-c.rfuchan:
 			if r.err != nil {
 				return r.err
 			}
 			if r.n < ConnPacketSize {
+				log.WithFields(log.Fields{
+					"raddr": c.raddr.String(),
+					"size":  r.n,
+				}).Debug("connect: discarding too-small packet")
 				//return fmt.Errorf("ConnPacket not large enough")
 				continue
 			}
 			hdr := ReadPacketHdr(r.buf)
 			if hdr.StatusByte != IPID_Conn {
+				log.WithFields(log.Fields{
+					"raddr": c.raddr.String(),
+					"type":  hdr.StatusByte,
+				}).Debug("connect: discarding unexpected packet")
 				//return fmt.Errorf("received unexpected packet type %d", hdr.StatusByte)
 				continue
 			}
@@ -95,15 +155,17 @@ func (c *Conn) connect() error {
 			if connrepkg.ProtocolVer != ProtocolVer {
 				return fmt.Errorf("unsupported protocol version %d", connrepkg.ProtocolVer)
 			}
+			log.WithField("raddr", c.raddr.String()).Debug("connect: <- ConnRePacket")
 			c.laddr = &connrepkg.Addr
 			recvaddr = r.addr
 		}
 	}
 
 	// 3. ConnOkPacket --->
-	// TODO: Retransmission?
+	// TODO: Retransmission? Is this any ACK for this packet?
+	log.WithField("raddr", c.raddr.String()).Debug("connect: -> ConnOkPacket")
 	connokpkg := NewConnOkPacket(*recvaddr)
-	_, err = connokpkg.WriteTo(c.writer)
+	_, err := connokpkg.WriteTo(c.writer)
 	if err != nil {
 		return err
 	}

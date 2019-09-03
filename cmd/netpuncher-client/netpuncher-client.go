@@ -10,6 +10,14 @@ import (
 
 	"github.com/openclonk/netpuncher"
 	"github.com/openclonk/netpuncher/c4netioudp"
+
+	"github.com/apex/log"
+	"github.com/apex/log/handlers/cli"
+)
+
+const (
+	punchTimeout  = 5 * time.Second
+	punchInterval = 50 * time.Millisecond
 )
 
 var host = flag.Bool("host", false, "simulate host behavior")
@@ -17,6 +25,7 @@ var client = flag.Int("client", -1, "simulate client joining a host with given i
 var port = flag.Int("port", 0, "local port to use (default: random)")
 var v4 = flag.Bool("4", false, "use IPv4")
 var v6 = flag.Bool("6", false, "use IPv6")
+var verbose = flag.Bool("v", false, "more log output")
 
 func main() {
 	flag.Usage = func() {
@@ -27,6 +36,11 @@ func main() {
 	if flag.NArg() != 1 {
 		flag.Usage()
 		os.Exit(2)
+	}
+
+	log.SetHandler(cli.Default)
+	if *verbose {
+		log.SetLevel(log.DebugLevel)
 	}
 
 	network := "udp"
@@ -48,26 +62,15 @@ func main() {
 	laddr := net.UDPAddr{IP: ip, Port: *port}
 	listener, err := c4netioudp.Listen(network, &laddr)
 	if err != nil {
-		fmt.Println("couldn't Listen: ", err)
-		os.Exit(1)
+		log.WithError(err).Fatal("c4netioudp Listen failed")
 	}
 	defer listener.Close()
 
 	conn, err := listener.Dial(raddr)
 	if err != nil {
-		fmt.Println("couldn't Dial: ", err)
-		os.Exit(1)
+		log.WithError(err).Fatal("c4netioudp Dial failed")
 	}
 	defer conn.Close()
-
-	//fmt.Println("sending ping")
-	//ping := c4netioudp.PacketHdr{StatusByte: c4netioudp.IPID_Ping}
-	//n, err := ping.WriteTo(conn)
-	//if err != nil {
-	//	fmt.Println("couldn't send UDP", err)
-	//	os.Exit(1)
-	//}
-	//fmt.Println("sent", n, "byte")
 
 	// The following uses version 1 of the netpuncher protocol.
 	header := netpuncher.Header{Version: 1}
@@ -80,9 +83,9 @@ func main() {
 			panic(err)
 		}
 		conn.Write(b)
-		fmt.Printf("-> %T: %+v\n", sreq, sreq)
+		log.WithField("packet", fmt.Sprintf("%+v", sreq)).Infof("-> %T", sreq)
 		go handleMessages(listener, conn, false)
-		time.Sleep(2 * time.Second)
+		time.Sleep(10 * time.Second)
 	}
 
 	if *host {
@@ -107,36 +110,37 @@ func handleMessages(listener *c4netioudp.Listener, npconn *c4netioudp.Conn, isHo
 	for {
 		msg, err := netpuncher.ReadFrom(npconn)
 		if err != nil {
-			fmt.Println("error while reading:", err)
-			os.Exit(1)
+			log.WithError(err).Fatal("reading from netpuncher failed")
 		}
 		switch np := msg.(type) {
 		case *netpuncher.AssID:
-			fmt.Printf("CID = %d\n", np.CID)
+			log.Warnf("CID = %d", np.CID)
 		case *netpuncher.CReq:
-			fmt.Printf("<- %T: %+v\n", msg, msg)
-			// Send ping to the other side.
-			if err = npconn.SendTest(&np.Addr); err != nil {
-				fmt.Println("couldn't send test:", err)
-			}
-			if !isHost {
-				fmt.Printf("connecting to %s...\n", np.Addr.String())
-				go func() {
+			log.WithField("packet", fmt.Sprintf("%+v", msg)).Infof("<- %T", msg)
+			go func() {
+				// Try to establish communication.
+				if err = listener.Punch(&np.Addr, punchTimeout, punchInterval); err != nil {
+					log.WithError(err).WithField("raddr", np.Addr.String()).Error("punching failed")
+					return
+				}
+				if !isHost {
+					log.WithField("raddr", np.Addr.String()).Info("connecting...")
 					hostconn, err := listener.Dial(&np.Addr)
 					if err != nil {
-						fmt.Println("couldn't connect to host: ", err)
+						log.WithError(err).Error("couldn't connect to host")
 						return
 					}
 					defer hostconn.Close()
-					fmt.Println("connected successfully")
-					_, err = hostconn.Write([]byte("Hello world!\n"))
+					log.WithField("raddr", np.Addr.String()).Info("connected successfully")
+					_, err = hostconn.Write([]byte("Hello world!"))
 					if err != nil {
-						fmt.Println("couldn't send message to host: ", err)
+						log.WithError(err).WithField("raddr", np.Addr.String()).Error("couldn't send message to host")
 					}
-				}()
-			}
+					os.Exit(0)
+				}
+			}()
 		default:
-			fmt.Printf("<- %T: %+v\n", msg, msg)
+			log.WithField("packet", fmt.Sprintf("%+v", msg)).Infof("<- %T", msg)
 		}
 	}
 }
@@ -146,19 +150,19 @@ func handleConn(listener *c4netioudp.Listener) {
 	for {
 		conn, err := listener.AcceptConn()
 		if err != nil {
-			fmt.Println("error in Accept: ", err)
+			log.WithError(err).Error("error in Accept")
 			break
 		}
 		go func(conn *c4netioudp.Conn) {
 			defer conn.Close()
-			fmt.Printf("new connection from %s\n", conn.RemoteAddr().String())
+			log.WithField("raddr", conn.RemoteAddr().String()).Info("new connection")
 			var buf [100]byte
 			n, err := conn.Read(buf[:])
 			if err != nil {
-				fmt.Println("error while reading: ", err)
+				log.WithError(err).Error("error while reading")
 				return
 			}
-			fmt.Println("received: ", string(buf[0:n]))
+			log.WithField("raddr", conn.RemoteAddr().String()).Infof("received: %s", string(buf[0:n]))
 		}(conn)
 	}
 }

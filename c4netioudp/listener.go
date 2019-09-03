@@ -44,6 +44,16 @@ func addrkey(addr *net.UDPAddr) udpkey {
 	return udpkey(addr.String())
 }
 
+func (l *Listener) newConnTo(raddr *net.UDPAddr) *Conn {
+	writer := writerToUDP{l.udp, raddr}
+	conn := newConn()
+	conn.udp = l.udp
+	conn.raddr = raddr
+	conn.writer = writer
+	conn.closechan = l.closechan
+	return conn
+}
+
 func (l *Listener) handlePackets() {
 	rfuchan := make(chan rfu)
 	go readFromUDP(l.udp, rfuchan, l.quit)
@@ -104,14 +114,9 @@ func (l *Listener) handlePackets() {
 				// There's no need to read the initial ConnPacket, the client
 				// does all version checks. We may need to read the packet here
 				// in the future to support multiple protocol versions.
-				writer := writerToUDP{l.udp, r.addr}
+				conn := l.newConnTo(r.addr)
 				connrepkg := NewConnPacket(*r.addr)
-				connrepkg.WriteTo(writer)
-				conn = newConn()
-				conn.udp = l.udp
-				conn.raddr = r.addr
-				conn.writer = writer
-				conn.closechan = l.closechan
+				connrepkg.WriteTo(conn.writer)
 				connsinprogress[key] = conn
 				// Connection timeout
 				go func(key udpkey) {
@@ -158,13 +163,17 @@ func (l *Listener) Accept() (net.Conn, error) {
 	return l.AcceptConn()
 }
 
+func (l *Listener) Punch(raddr *net.UDPAddr, timeout, interval time.Duration) error {
+	// Create a temporary Conn to have packet forwarding from the listener.
+	conn := l.newConnTo(raddr)
+	conn.noclosepacket = true
+	l.dialchan <- conn
+	defer conn.Close()
+	return conn.punch(timeout, interval)
+}
+
 func (l *Listener) Dial(raddr *net.UDPAddr) (*Conn, error) {
-	writer := writerToUDP{l.udp, raddr}
-	conn := newConn()
-	conn.udp = l.udp
-	conn.raddr = raddr
-	conn.writer = writer
-	conn.closechan = l.closechan
+	conn := l.newConnTo(raddr)
 	// Register with packet handler so that forwarding works.
 	l.dialchan <- conn
 	if err := conn.connect(); err != nil {
