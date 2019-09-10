@@ -20,6 +20,18 @@
 //
 //      PID_Pong ---------------------------------------------------------------------->
 //
+//      **TCP Connect (IPv6)**
+//
+//                                                          <---------------------------   SReqTCP[1337]
+//
+//                                              (generates two ports)
+//            <-------------------------------  CReqTCP["[2001:db8::2]:60002",
+//                                                      "[2001:db8::1]:60001"]
+//                                              CReqTCP["[2001:db8::1]:60001",
+//                                                      "[2001:db8::2]:60002"] -------->
+//
+//      TCP SYN  <--------------------------------------------------------------------->   TCP SYN (simultaneous open)
+//
 package netpuncher
 
 import (
@@ -33,14 +45,16 @@ import (
 )
 
 const (
-	PID_Puncher_AssID = 0x51 // Puncher announcing ID to client
-	PID_Puncher_SReq  = 0x52 // Client requesting to be served with punching (for an ID)
-	PID_Puncher_CReq  = 0x53 // Puncher requesting clients to punch (towards an address)
-	PID_Puncher_IDReq = 0x54 // Client requesting an ID
+	PID_Puncher_AssID   = 0x51 // Puncher announcing ID to client
+	PID_Puncher_SReq    = 0x52 // Client requesting to be served with punching (for an ID)
+	PID_Puncher_CReq    = 0x53 // Puncher requesting clients to punch (towards an address)
+	PID_Puncher_IDReq   = 0x54 // Client requesting an ID
+	PID_Puncher_SReqTCP = 0x62 // Client requesting to be served with TCP-punching (for an ID)
+	PID_Puncher_CReqTCP = 0x63 // Puncher requesting clients to TCP-punch (towards an address)
 )
 
-// 2 byte header, CReq is largest (port and IP)
-const MaxPacketSize = 2 + 18
+// 2 byte header, CReqTCP is largest (two port and IP)
+const MaxPacketSize = 2 + 36
 
 type PuncherPacket interface {
 	Type() byte
@@ -96,6 +110,10 @@ func ReadFrom(r io.Reader) (PuncherPacket, error) {
 		p = &CReq{}
 	case PID_Puncher_IDReq:
 		p = &IDReq{}
+	case PID_Puncher_SReqTCP:
+		p = &SReqTCP{}
+	case PID_Puncher_CReqTCP:
+		p = &CReqTCP{}
 	default:
 		return nil, ErrUnknownType(buf[0])
 	}
@@ -257,5 +275,101 @@ func (p *CReq) UnmarshalBinary(buf []byte) error {
 		return ErrInvalidMessage(err.Error())
 	}
 	p.Addr = net.UDPAddr{Port: int(port), IP: ip[:]}
+	return nil
+}
+
+type SReqTCP struct {
+	Header
+	CID uint32
+}
+
+func (*SReqTCP) Type() byte { return PID_Puncher_SReqTCP }
+
+// error is always nil
+func (p SReqTCP) MarshalBinary() ([]byte, error) {
+	var b bytes.Buffer
+	p.Header.Type = p.Type()
+	binary.Write(&b, binary.LittleEndian, p)
+	return b.Bytes(), nil
+}
+
+func (p *SReqTCP) UnmarshalBinary(buf []byte) error {
+	b := bytes.NewReader(buf)
+	err := binary.Read(b, binary.LittleEndian, p)
+	if err != nil {
+		return ErrInvalidMessage(err.Error())
+	}
+	if !p.Header.Version.Supported() {
+		return ErrUnsupportedVersion(p.Header.Version)
+	}
+	return nil
+}
+
+// Addr is encoded as 16 bit TCP port (little endian) and 16 byte IPv6 address.
+type CReqTCP struct {
+	Header
+	SourceAddr net.TCPAddr
+	DestAddr   net.TCPAddr
+}
+
+func (*CReqTCP) Type() byte { return PID_Puncher_CReqTCP }
+
+func writeTCPAddr(w io.Writer, addr net.TCPAddr) error {
+	err := binary.Write(w, binary.LittleEndian, uint16(addr.Port))
+	if err != nil {
+		return err
+	}
+	v6 := addr.IP.To16()
+	if v6 == nil {
+		return errors.New("cannot marshal TCPAddr: IP nil")
+	}
+	return binary.Write(w, binary.LittleEndian, v6)
+}
+
+func readTCPAddr(r io.Reader) (net.TCPAddr, error) {
+	var port uint16
+	if err := binary.Read(r, binary.LittleEndian, &port); err != nil {
+		return net.TCPAddr{}, ErrInvalidMessage(err.Error())
+	}
+	var ip [16]byte
+	if err := binary.Read(r, binary.LittleEndian, &ip); err != nil {
+		return net.TCPAddr{}, ErrInvalidMessage(err.Error())
+	}
+	return net.TCPAddr{Port: int(port), IP: ip[:]}, nil
+}
+
+// Fails if SourceAddr or DestAddr is not set
+func (p CReqTCP) MarshalBinary() ([]byte, error) {
+	var b bytes.Buffer
+	p.Header.Type = p.Type()
+	binary.Write(&b, binary.LittleEndian, p.Header)
+	err := writeTCPAddr(&b, p.SourceAddr)
+	if err != nil {
+		return nil, err
+	}
+	err = writeTCPAddr(&b, p.DestAddr)
+	if err != nil {
+		return nil, err
+	}
+	return b.Bytes(), nil
+}
+
+func (p *CReqTCP) UnmarshalBinary(buf []byte) error {
+	b := bytes.NewReader(buf)
+	if err := binary.Read(b, binary.LittleEndian, &p.Header); err != nil {
+		return ErrInvalidMessage(err.Error())
+	}
+	if !p.Header.Version.Supported() {
+		return ErrUnsupportedVersion(p.Header.Version)
+	}
+	var err error
+	p.SourceAddr, err = readTCPAddr(b)
+	if err != nil {
+		return err
+	}
+	p.DestAddr, err = readTCPAddr(b)
+	if err != nil {
+		return err
+	}
 	return nil
 }

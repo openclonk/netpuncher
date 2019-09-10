@@ -66,7 +66,10 @@ func (c *Conn) handlePackets(req chan<- punchReq, close chan<- uint32) {
 			}
 		case *netpuncher.SReq:
 			c.version = np.Header.Version
-			req <- punchReq{np.CID, c}
+			req <- punchReq{np.CID, c, false}
+		case *netpuncher.SReqTCP:
+			c.version = np.Header.Version
+			req <- punchReq{np.CID, c, true}
 		}
 	}
 }
@@ -74,6 +77,7 @@ func (c *Conn) handlePackets(req chan<- punchReq, close chan<- uint32) {
 type punchReq struct {
 	id   uint32
 	conn *Conn
+	tcp  bool
 }
 
 type Server struct {
@@ -87,6 +91,13 @@ type Server struct {
 
 	listener *c4netioudp.Listener
 	exitch   chan struct{} // signals that the server should exit
+}
+
+// randomPort generates a random dynamic port.
+func randomPort(rng *rand.Rand) int {
+	min := 49152
+	max := 65535
+	return min + rng.Intn(max-min)
 }
 
 // Listen starts the netpuncher server.
@@ -139,22 +150,37 @@ func (s *Server) Listen(network string, listenaddr *net.UDPAddr) error {
 				if host, ok := conns[r.id]; ok {
 					caddr := client.NetIOConn.RemoteAddr().(*net.UDPAddr)
 					haddr := host.NetIOConn.RemoteAddr().(*net.UDPAddr)
-					buf, err := netpuncher.CReq{Header: host.npHeader(), Addr: *caddr}.MarshalBinary()
-					if err != nil {
+					var hbuf, cbuf []byte
+					var herr, cerr error
+					if r.tcp {
+						caddrtcp := net.TCPAddr{IP: caddr.IP, Port: randomPort(rng)}
+						haddrtcp := net.TCPAddr{IP: haddr.IP, Port: randomPort(rng)}
+						hbuf, herr = netpuncher.CReqTCP{
+							Header:     host.npHeader(),
+							SourceAddr: haddrtcp,
+							DestAddr:   caddrtcp}.MarshalBinary()
+						cbuf, cerr = netpuncher.CReqTCP{
+							Header:     client.npHeader(),
+							SourceAddr: caddrtcp,
+							DestAddr:   haddrtcp}.MarshalBinary()
+					} else {
+						hbuf, herr = netpuncher.CReq{Header: host.npHeader(), Addr: *caddr}.MarshalBinary()
+						cbuf, cerr = netpuncher.CReq{Header: client.npHeader(), Addr: *haddr}.MarshalBinary()
+					}
+					if herr != nil {
 						if s.MarshalErr != nil {
-							s.MarshalErr(fmt.Errorf("CReq.MarshalBinary(): %v", err))
+							s.MarshalErr(fmt.Errorf("CReq.MarshalBinary() host: %v", herr))
 						}
 						continue
 					}
-					host.NetIOConn.Write(buf)
-					buf, err = netpuncher.CReq{Header: client.npHeader(), Addr: *haddr}.MarshalBinary()
-					if err != nil {
+					host.NetIOConn.Write(hbuf)
+					if cerr != nil {
 						if s.MarshalErr != nil {
-							s.MarshalErr(fmt.Errorf("CReq.MarshalBinary(): %v", err))
+							s.MarshalErr(fmt.Errorf("CReq.MarshalBinary() client: %v", cerr))
 						}
 						continue
 					}
-					client.NetIOConn.Write(buf)
+					client.NetIOConn.Write(cbuf)
 					if s.CReq != nil {
 						s.CReq(host, client)
 					}

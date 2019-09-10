@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"net"
@@ -80,11 +81,21 @@ func main() {
 		sreq := netpuncher.SReq{Header: header, CID: uint32(*client)}
 		b, err := sreq.MarshalBinary()
 		if err != nil {
-			panic(err)
+			log.WithError(err).Fatal("SReq.MarshalBinary failed")
 		}
 		conn.Write(b)
 		log.WithField("packet", fmt.Sprintf("%+v", sreq)).Infof("-> %T", sreq)
 		go handleMessages(listener, conn, false)
+		if *v6 {
+			// IPv6 => also request TCP punching
+			sreqtcp := netpuncher.SReqTCP{Header: header, CID: uint32(*client)}
+			b, err = sreqtcp.MarshalBinary()
+			if err != nil {
+				log.WithError(err).Fatal("SReqTCP.MarshalBinary failed")
+			}
+			conn.Write(b)
+			log.WithField("packet", fmt.Sprintf("%+v", sreqtcp)).Infof("-> %T", sreqtcp)
+		}
 		time.Sleep(10 * time.Second)
 	}
 
@@ -136,7 +147,34 @@ func handleMessages(listener *c4netioudp.Listener, npconn *c4netioudp.Conn, isHo
 					if err != nil {
 						log.WithError(err).WithField("raddr", np.Addr.String()).Error("couldn't send message to host")
 					}
-					os.Exit(0)
+				}
+			}()
+		case *netpuncher.CReqTCP:
+			log.WithField("packet", fmt.Sprintf("%+v", msg)).Infof("<- %T", msg)
+			go func() {
+				log.WithField("raddr", np.DestAddr.String()).Info("connecting TCP...")
+				conn, err := net.DialTCP("tcp6", &np.SourceAddr, &np.DestAddr)
+				if err != nil {
+					log.WithError(err).WithField("raddr", np.DestAddr.String()).Error("couldn't dial")
+					return
+				}
+				defer conn.Close()
+				log.WithField("raddr", np.DestAddr.String()).Info("connected TCP successfully")
+				if !isHost {
+					// send a message
+					_, err = conn.Write([]byte("Hello TCP world!\n"))
+					if err != nil {
+						log.WithError(err).WithField("raddr", np.DestAddr.String()).Error("couldn't send TCP message to host")
+					}
+				} else {
+					// receive message
+					r := bufio.NewReader(conn)
+					msg, err := r.ReadString('\n')
+					if err != nil {
+						log.WithError(err).WithField("raddr", np.DestAddr.String()).Error("couldn't read TCP message from client")
+						return
+					}
+					log.WithField("raddr", np.DestAddr.String()).Infof("received: %s", msg)
 				}
 			}()
 		default:

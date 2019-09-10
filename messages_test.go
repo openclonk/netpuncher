@@ -14,6 +14,8 @@ var samplePackets = []PuncherPacket{
 	&AssID{Header{PID_Puncher_AssID, version}, 0xf0f0f0f0},
 	&SReq{Header{PID_Puncher_SReq, version}, 0xf0f0f0f0},
 	&CReq{Header{PID_Puncher_CReq, version}, net.UDPAddr{Port: 0xff11, IP: net.ParseIP("2001:db8::1337")}},
+	&SReqTCP{Header{PID_Puncher_SReqTCP, version}, 0xf1f1f1f1},
+	&CReqTCP{Header{PID_Puncher_CReqTCP, version}, net.TCPAddr{Port: 0xff11, IP: net.ParseIP("2001:db8::1337")}, net.TCPAddr{Port: 0xff22, IP: net.ParseIP("2001:db8::1338")}},
 }
 
 func TestMarshalRoundtrip(t *testing.T) {
@@ -30,6 +32,16 @@ func TestMarshalRoundtrip(t *testing.T) {
 		}
 		if !reflect.DeepEqual(pkt, cpy) {
 			t.Errorf("%T packets not equal: %+v != %+v", pkt, pkt, cpy)
+		}
+		// same with ReadFrom (might fail if MaxPacketSize is too small)
+		r := bytes.NewReader(buf)
+		cpy2, err := ReadFrom(r)
+		if err != nil {
+			t.Errorf("ReadFrom for %T failed: %v", pkt, err)
+			continue
+		}
+		if !reflect.DeepEqual(pkt, cpy2) {
+			t.Errorf("%T packets not equal after ReadFrom: %+v != %+v", pkt, pkt, cpy2)
 		}
 	}
 }
