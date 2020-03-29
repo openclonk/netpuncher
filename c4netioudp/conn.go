@@ -70,8 +70,8 @@ func Dial(network string, laddr, raddr *net.UDPAddr) (*Conn, error) {
 func (c *Conn) punch(timeout, interval time.Duration) error {
 	timeouttimer := time.NewTimer(timeout)
 	intervaltimer := time.NewTimer(interval)
-	sendTest := func() {
-		err := c.SendTest(c.raddr)
+	sendMsg := func() {
+		err := c.SendPing(c.raddr)
 		if err != nil {
 			// I'm sometimes getting `sendto: operation not permitted` errors
 			// here that seem to be transient. Just log and ignore all errors.
@@ -83,7 +83,7 @@ func (c *Conn) punch(timeout, interval time.Duration) error {
 		select {
 		case <-intervaltimer.C:
 			log.WithField("raddr", c.raddr.String()).Debug("punch: sending")
-			sendTest()
+			sendMsg()
 			intervaltimer.Reset(interval)
 		case <-timeouttimer.C:
 			log.WithField("raddr", c.raddr.String()).Debug("punch: timeout")
@@ -95,7 +95,7 @@ func (c *Conn) punch(timeout, interval time.Duration) error {
 			log.WithField("raddr", c.raddr.String()).Debug("punch: success")
 			// We received something, so we've punched through - the actual content doesn't matter.
 			// Send one more message to signal the other side.
-			sendTest()
+			sendMsg()
 			return nil
 		}
 	}
@@ -411,6 +411,17 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 		size:      size,
 	}
 	return len(b), nil
+}
+
+// SendPing sends an IPID_Ping message to raddr.
+// A remote Clonk instance will reply with another IPID_Ping message.
+func (c *Conn) SendPing(raddr *net.UDPAddr) error {
+	ping := PacketHdr{StatusByte: IPID_Ping}
+	var buf bytes.Buffer
+	_, err := ping.WriteTo(&buf)
+	// (writing to bytes.Buffer cannot fail)
+	_, err = c.udp.WriteToUDP(buf.Bytes(), raddr)
+	return err
 }
 
 // SendTest sends an IPID_Test message to raddr.
