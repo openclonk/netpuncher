@@ -10,8 +10,7 @@
       (system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
-          # https://github.com/nix-community/gomod2nix/pull/168
-          go = pkgs.go_1_22;
+          go = pkgs.go;
         in
         {
           packages.default = pkgs.callPackage ./. {
